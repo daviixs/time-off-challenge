@@ -1,63 +1,107 @@
 # Time-Off Microservice TRD
 
-## Summary
-This service is a NestJS-based time-off microservice that sits between ExampleHR users and an authoritative HCM balance system. It owns request workflow state, maintains a local balance projection cache, ingests batch and realtime HCM sync events, and only finalizes approvals or approved-request cancellations after the HCM confirms the corresponding balance mutation.
+## 1. Summary
+ReadyOn needs a dedicated time-off microservice that acts as the workflow system for employees and managers while deferring authoritative balance truth to the HCM. The service must give employees fast feedback, let managers approve safely, and remain correct even when HCM balances change outside ReadyOn through year resets, anniversary grants, or direct HR actions.
 
-## Core Requirements
-- HCM is the source of truth for balance values by `(employeeId, locationId, leaveType)`.
-- Local state is authoritative for request workflow status.
-- Employees may create and read only their own requests and balances.
-- Managers may approve, reject, list, and cancel any request.
-- Requests use inclusive calendar-day duration.
-- Overlapping `PENDING` or `APPROVED` requests for the same employee, location, leave type, and date range are rejected.
-- Approval always revalidates against HCM before consumption.
-- Cancelling an approved request performs a compensating HCM restore.
-- Batch and realtime HCM syncs upsert local balance projections and mark pending requests `atRisk` when the refreshed balance can no longer cover them.
+This implementation uses NestJS + Prisma + SQLite, exposes REST endpoints for request lifecycle and balance sync, maintains a local balance projection cache, and treats HCM writes as first-class operations with idempotency and defensive validation.
 
-## Architecture
-- `RequestsService`: create, approve, reject, and cancel workflows.
-- `BalancesService`: TTL-based balance freshness and authoritative refresh from HCM.
-- `SyncService`: realtime and batch ingestion, precedence checks, and `atRisk` recomputation.
-- `HcmClientService`: outbound HCM HTTP client with error normalization and operation audit logging.
-- Prisma repositories: employees, balances, time-off requests, sync logs, and HCM operation logs.
-- Mock auth: trusted `x-user-id` and `x-role` headers.
-- Persistence: Prisma + SQLite, with the Prisma 7 `better-sqlite3` adapter.
+## 2. Key Challenges
+- Dual-writer risk: ReadyOn is not the only system mutating HCM balances.
+- Stale reads: a locally cached balance may already be invalid when a manager approves.
+- HCM error dependence is unsafe: the service cannot assume HCM always rejects insufficient-balance requests correctly.
+- Dimensional integrity: balances are scoped by `(employeeId, locationId, leaveType)`.
+- Sync asymmetry: the system must support both realtime single-record updates and full-corpus batch updates from HCM.
+- User experience tension: employees want immediate feedback, but correctness requires authoritative revalidation.
+- Retry ambiguity: timeouts during HCM writes must not lead to duplicate balance consumption.
+- Reviewer expectations: the take-home is evaluated on TRD quality, rigor of tests, and clarity of evidence.
 
-## Data Model
+## 3. Goals and Non-Goals
+### Goals
+- Preserve balance integrity when creating, approving, rejecting, and cancelling time-off requests.
+- Keep HCM as the source of truth for balances.
+- Give fast reads through a local projection with freshness controls.
+- Provide clear REST APIs and deterministic error contracts.
+- Ship a robust test suite with unit, integration, and e2e coverage, including a realistic mock HCM.
+
+### Non-Goals
+- Full authentication platform or login flows.
+- Real employee hierarchy management.
+- Payroll or holiday-calendar logic.
+- Distributed orchestration or asynchronous event buses beyond the service boundary.
+
+## 4. Proposed Solution
+### Architecture
+- `RequestsService`: owns request creation, approval, rejection, and cancellation.
+- `BalancesService`: owns TTL freshness checks and authoritative refresh from HCM.
+- `SyncService`: owns inbound realtime and batch HCM balance ingestion.
+- `HcmClientService`: owns outbound HCM fetch/consume/restore calls, error normalization, and audit logging.
+- Prisma repositories: employees, balances, requests, sync logs, and HCM operation logs.
+- SQLite-backed local state with a Prisma 7 `better-sqlite3` adapter.
+
+### Core Design Decisions
+- Local workflow state is authoritative for request status.
+- HCM is authoritative for balance values.
+- Request creation validates against a fresh-enough projection but does not reserve balance.
+- Approval always performs authoritative HCM revalidation before consumption.
+- Approved cancellation performs a compensating HCM restore.
+- Batch and realtime syncs update projections and recompute `atRisk` warnings for pending requests.
+- HCM write calls use deterministic idempotency keys derived from request id and operation.
+
+## 5. Why This Design
+### Alternative A: Strict synchronous coordinator
+ReadyOn owns request status, but balance mutations are confirmed synchronously against HCM before final approval.  
+Decision: chosen. It is the best fit for the challenge because it keeps the UX understandable, avoids hidden asynchronous reconciliation, and demonstrates defensive consistency clearly.
+
+### Alternative B: Local reservation model
+ReadyOn reserves balance locally at request creation and reconciles later with HCM.  
+Rejected because it weakens the HCM-as-source-of-truth model and makes drift harder to reason about.
+
+### Alternative C: Async outbox / eventual consistency
+ReadyOn records approval intent locally and completes HCM consumption asynchronously.  
+Rejected for this take-home because it adds operational complexity and weakens the “manager approves knowing the data is valid” requirement.
+
+### REST vs GraphQL
+REST was chosen because the challenge explicitly asks for “all necessary REST (or GraphQL) endpoints,” and the domain operations are command-heavy and explicit.
+
+### SQLite vs PostgreSQL
+SQLite is acceptable for the challenge and required by the prompt. PostgreSQL would be the production migration path for stronger concurrency controls and operational durability.
+
+## 6. Data Model
 - `Employee`
-  - Local reference only for ownership and role checks.
+  - Local reference entity for ownership and role checks.
   - Fields: `id`, `name`, `email`, `role`, timestamps.
 - `Balance`
   - Local HCM projection keyed by `(employeeId, locationId, leaveType)`.
   - Fields: `availableDays`, `lastSyncedAt`, `sourceUpdatedAt`, `version`, timestamps.
 - `TimeOffRequest`
-  - Request workflow aggregate.
-  - Fields: date range, `durationDays`, `status`, notes, resolver fields, `hcmTransactionId`, `atRisk`, timestamps.
+  - Workflow aggregate.
+  - Fields: `startDate`, `endDate`, `durationDays`, `status`, `statusReason`, `notes`, `managerNotes`, `resolvedAt`, `resolvedBy`, `hcmTransactionId`, `atRisk`, timestamps.
 - `SyncLog`
-  - One row per inbound sync request, with processed and skipped counts.
+  - One row per inbound sync run.
 - `HcmOperationLog`
-  - One row per outbound HCM call, including idempotency metadata and error details.
+  - One row per outbound HCM call, including idempotency metadata and normalized failures.
 
-## Main Flows
+## 7. Main Flows
 ### Create request
-1. Parse actor headers and require `EMPLOYEE`.
-2. Validate date range and inclusive duration.
-3. Reject overlapping `PENDING` or `APPROVED` requests.
-4. Refresh the local balance from HCM if the projection is stale or missing.
-5. Reject if the projected balance is insufficient.
-6. Persist the request as `PENDING`.
+1. Parse trusted actor headers.
+2. Require employee ownership of the request.
+3. Validate date range and inclusive calendar-day duration.
+4. Reject overlapping `PENDING` or `APPROVED` requests.
+5. Refresh the balance from HCM when the local projection is stale or missing.
+6. Reject immediately on insufficient projected balance.
+7. Persist as `PENDING`.
 
 ### Approve request
-1. Require `MANAGER`.
+1. Require manager role.
 2. Load the request and require `PENDING`.
 3. Fetch the authoritative balance from HCM and upsert the local projection.
 4. Reject if the authoritative balance is insufficient.
-5. Call HCM `consume` with an idempotency key derived from the request id.
+5. Call HCM `consume` with an idempotency key.
 6. Upsert the returned balance projection.
-7. Conditionally transition the request to `APPROVED` and persist the HCM transaction id.
+7. Transition the request to `APPROVED` only after HCM success.
 
 ### Reject request
-1. Require `MANAGER`.
+1. Require manager role.
 2. Load the request and require `PENDING`.
 3. Transition directly to `REJECTED`.
 
@@ -68,23 +112,35 @@ This service is a NestJS-based time-off microservice that sits between ExampleHR
 4. Transition the request to `CANCELLED`.
 
 ### Sync flows
-- `POST /sync/realtime`: upsert one balance projection and recompute `atRisk` for pending requests in that dimension.
-- `POST /sync/batch`: upsert multiple balances, skipping older records when a fresher `sourceUpdatedAt` already exists locally.
+- `POST /sync/realtime`: upsert a single balance projection and recompute `atRisk` for matching pending requests.
+- `POST /sync/batch`: upsert a corpus of balances, skipping records older than the currently stored `sourceUpdatedAt`.
 
-## Public API
-- `GET /health`
-- `POST /time-off/requests`
-- `GET /time-off/requests`
-- `GET /time-off/requests/:id`
-- `PATCH /time-off/requests/:id/approve`
-- `PATCH /time-off/requests/:id/reject`
-- `PATCH /time-off/requests/:id/cancel`
-- `GET /balances?employeeId=&locationId=&leaveType=`
-- `POST /sync/realtime`
-- `POST /sync/batch`
+## 8. Public API
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness check |
+| `POST` | `/time-off/requests` | Submit a request |
+| `GET` | `/time-off/requests` | List requests |
+| `GET` | `/time-off/requests/:id` | Fetch one request |
+| `PATCH` | `/time-off/requests/:id/approve` | Approve pending request |
+| `PATCH` | `/time-off/requests/:id/reject` | Reject pending request |
+| `PATCH` | `/time-off/requests/:id/cancel` | Cancel pending or approved request |
+| `GET` | `/balances` | Fetch current balance projection |
+| `POST` | `/sync/realtime` | Ingest one HCM balance update |
+| `POST` | `/sync/batch` | Ingest a batch HCM balance corpus |
 
-## Error Contract
-The API normalizes business failures to:
+## 9. Error Contract
+Error payload shape:
+
+```json
+{
+  "statusCode": 422,
+  "error": "INSUFFICIENT_BALANCE",
+  "message": "Requested 3 days but only 2 remain."
+}
+```
+
+Normalized codes:
 - `UNAUTHENTICATED`
 - `FORBIDDEN_ROLE`
 - `EMPLOYEE_NOT_FOUND`
@@ -98,19 +154,45 @@ The API normalizes business failures to:
 - `HCM_RESULT_UNKNOWN`
 - `HCM_WRITE_FAILED`
 
-## Configuration
-- `DATABASE_URL`
-- `HCM_BASE_URL`
-- `BALANCE_TTL_MS`
-- `HCM_TIMEOUT_MS`
-- `PORT`
+## 10. Testing Strategy
+### Unit tests
+- Policy helpers: inclusive duration, stale balance detection, idempotency-key generation.
+- Request service behavior: create, approve, reject, cancel, overlap rules, date validation.
+- Balance service behavior: fresh vs stale projection handling.
+- Sync service behavior: batch precedence and `atRisk` recomputation.
 
-## Test Strategy
-- Unit tests cover policy helpers and pure request/balance/sync service behavior.
-- Integration tests cover the real Nest dependency graph with Prisma repositories and an injected HCM client mock.
-- E2E tests cover HTTP flows against the running Nest app and a real mock HCM server.
-- The mock HCM server supports seed/reset controls, scenario injection, call introspection, and idempotent consume/restore handling.
+### Integration tests
+- Real Nest dependency graph.
+- Real Prisma repositories and SQLite.
+- Injected HCM client mock for service-level behavior without HTTP.
 
-## Known Trade-offs
-- The service uses mock header auth because auth is intentionally out of scope for the challenge.
-- SQLite is sufficient for challenge delivery, but production deployment should move to PostgreSQL and add stronger row-level concurrency controls around balance reservations if HCM write guarantees are weaker than assumed.
+### End-to-end tests
+- HTTP request lifecycle against the real Nest app.
+- Real mock HCM server with seed/reset/scenario controls.
+- Happy path, approval path, approved cancellation path, and realtime `atRisk` path.
+
+## 11. Requirement-to-Evidence Matrix
+| Requirement | Endpoint / Flow | Evidence |
+| --- | --- | --- |
+| Balance keyed by employee/location/leave type | balance projection and sync logic | [src/balances/application/balances.service.spec.ts](../src/balances/application/balances.service.spec.ts), [src/sync/application/sync.service.spec.ts](../src/sync/application/sync.service.spec.ts) |
+| Reject invalid date ranges | create request | [src/time-off/application/requests.service.spec.ts](../src/time-off/application/requests.service.spec.ts) |
+| Reject overlapping requests | create request | [src/time-off/application/requests.service.spec.ts](../src/time-off/application/requests.service.spec.ts) |
+| Revalidate against HCM on approval | approve request | [src/time-off/application/requests.service.approve.spec.ts](../src/time-off/application/requests.service.approve.spec.ts), [src/integration/requests.integration.spec.ts](../src/integration/requests.integration.spec.ts), [test/time-off.e2e-spec.ts](../test/time-off.e2e-spec.ts) |
+| Keep request pending when HCM approval fails | approve request | [src/time-off/application/requests.service.approve.spec.ts](../src/time-off/application/requests.service.approve.spec.ts), [src/integration/requests.integration.spec.ts](../src/integration/requests.integration.spec.ts) |
+| Restore balance on approved cancellation | cancel request | [src/time-off/application/requests.service.lifecycle.spec.ts](../src/time-off/application/requests.service.lifecycle.spec.ts), [test/time-off.e2e-spec.ts](../test/time-off.e2e-spec.ts) |
+| Process batch and realtime syncs defensively | sync flows | [src/sync/application/sync.service.spec.ts](../src/sync/application/sync.service.spec.ts), [test/time-off.e2e-spec.ts](../test/time-off.e2e-spec.ts) |
+| Mock HCM with realistic controls | external dependency simulation | [test/support/mock-hcm-server.ts](../test/support/mock-hcm-server.ts), [scripts/mock-hcm-server.js](../scripts/mock-hcm-server.js) |
+
+## 12. Assumptions
+- Authentication is out of scope; actor identity is provided by trusted headers.
+- Any `MANAGER` may approve or reject any request.
+- Duration is inclusive calendar days, not business days.
+- Holiday calendars and partial-day rules are intentionally deferred.
+- Sync endpoints are trusted integration endpoints, not public end-user endpoints.
+- SQLite is sufficient for the take-home but is not the long-term concurrency target.
+
+## 13. Trade-offs and Deferred Work
+- The service relies on synchronous HCM confirmation for approvals and approved cancellations; this is simpler and safer for the take-home than eventual consistency.
+- SQLite limits how far true concurrent-write guarantees can be demonstrated compared with PostgreSQL.
+- The current implementation logs HCM operations and sync runs but does not yet expose a dedicated operator-facing audit API.
+- Production hardening beyond the challenge would include stronger retry policies, backoff/circuit breaking, and explicit operational dashboards.
