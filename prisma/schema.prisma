@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+enum Role {
+  EMPLOYEE
+  MANAGER
+}
+
+enum LeaveType {
+  VACATION
+  SICK
+  PERSONAL
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum SyncType {
+  BATCH
+  REALTIME
+}
+
+enum SyncStatus {
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+enum HcmOperationType {
+  GET_BALANCE
+  CONSUME
+  RESTORE
+}
+
+enum HcmOperationStatus {
+  SUCCESS
+  FAILED
+  UNKNOWN
+}
+
+model Employee {
+  id        String           @id
+  name      String
+  email     String           @unique
+  role      Role
+  balances  Balance[]
+  requests  TimeOffRequest[]
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+}
+
+model Balance {
+  id              String   @id @default(cuid())
+  employeeId      String
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  locationId      String
+  leaveType       LeaveType
+  availableDays   Float
+  lastSyncedAt    DateTime
+  sourceUpdatedAt DateTime?
+  version         Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([employeeId, locationId, leaveType])
+  @@index([employeeId, locationId])
+}
+
+model TimeOffRequest {
+  id               String        @id @default(cuid())
+  employeeId       String
+  employee         Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  locationId       String
+  leaveType        LeaveType
+  startDate        DateTime
+  endDate          DateTime
+  durationDays     Float
+  status           RequestStatus
+  statusReason     String?
+  notes            String?
+  managerNotes     String?
+  resolvedAt       DateTime?
+  resolvedBy       String?
+  hcmTransactionId String?
+  atRisk           Boolean       @default(false)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([employeeId, status])
+  @@index([employeeId, locationId, leaveType, startDate, endDate])
+}
+
+model SyncLog {
+  id               String     @id @default(cuid())
+  syncType         SyncType
+  triggeredBy      String
+  status           SyncStatus
+  recordsProcessed Int
+  skipped          Int        @default(0)
+  errorDetails     String?
+  createdAt        DateTime   @default(now())
+}
+
+model HcmOperationLog {
+  id             String             @id @default(cuid())
+  idempotencyKey String?
+  operationType  HcmOperationType
+  requestId      String?
+  employeeId     String?
+  locationId     String?
+  leaveType      LeaveType?
+  payloadHash    String?
+  status         HcmOperationStatus
+  responseCode   Int?
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([requestId, operationType])
+  @@index([employeeId, locationId, leaveType])
+}
