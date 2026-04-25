@@ -8,5 +8,5 @@ export class ListTimeOffRequestsDto {
 
   @IsOptional()
   @IsEnum(RequestStatus)
-  status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+  status?: RequestStatus;
 }

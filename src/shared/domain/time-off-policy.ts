@@ -46,3 +46,26 @@ export function buildHcmIdempotencyKey(
 ): string {
   return `time-off:${requestId}:${action}:v1`;
 }
+
+export function buildCreateRequestIdempotencyHash(input: {
+  employeeId: string;
+  locationId: string;
+  leaveType: string;
+  startDate: string;
+  endDate: string;
+  notes?: string | null;
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        employeeId: input.employeeId,
+        locationId: input.locationId,
+        leaveType: input.leaveType,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        notes: input.notes ?? null,
+      }),
+    )
+    .digest('hex');
+}
+import { createHash } from 'crypto';

@@ -1,4 +1,8 @@
 import {
+  type ValidatedBalancePayload,
+  validateHcmBalancePayload,
+} from '../../hcm/hcm-balance-payload';
+import {
   type BalanceProjection,
   type LeaveType,
   type TimeOffRequest,
@@ -11,6 +15,8 @@ type IncomingBalance = {
   availableDays: number;
   sourceUpdatedAt: Date;
 };
+
+type ValidatedIncomingBalance = ValidatedBalancePayload;
 
 type BalanceStore = {
   findByDimension(
@@ -57,8 +63,30 @@ export class SyncService {
   async syncRealtime(input: {
     triggeredBy: string;
     balance: IncomingBalance;
-  }): Promise<{ synced: true }> {
-    const balance = await this.upsertIncomingBalance(input.balance);
+  }): Promise<{ synced: boolean; skipped: boolean }> {
+    const existing = await this.dependencies.balances.findByDimension(
+      input.balance.employeeId,
+      input.balance.locationId,
+      input.balance.leaveType,
+    );
+
+    const validated = this.validateIncomingBalance(input.balance);
+
+    if (
+      existing?.sourceUpdatedAt &&
+      existing.sourceUpdatedAt.getTime() >= validated.sourceUpdatedAt.getTime()
+    ) {
+      await this.dependencies.syncLogs.create({
+        syncType: 'REALTIME',
+        triggeredBy: input.triggeredBy,
+        status: 'SUCCESS',
+        recordsProcessed: 0,
+        skipped: 1,
+      });
+      return { synced: false, skipped: true };
+    }
+
+    const balance = await this.upsertIncomingBalance(validated);
     await this.updateAtRiskFlags(balance);
     await this.dependencies.syncLogs.create({
       syncType: 'REALTIME',
@@ -67,7 +95,7 @@ export class SyncService {
       recordsProcessed: 1,
       skipped: 0,
     });
-    return { synced: true };
+    return { synced: true, skipped: false };
   }
 
   async syncBatch(input: {
@@ -78,21 +106,22 @@ export class SyncService {
     let skipped = 0;
 
     for (const balance of input.balances) {
+      const validated = this.validateIncomingBalance(balance);
       const existing = await this.dependencies.balances.findByDimension(
-        balance.employeeId,
-        balance.locationId,
-        balance.leaveType,
+        validated.employeeId,
+        validated.locationId,
+        validated.leaveType,
       );
 
       if (
         existing?.sourceUpdatedAt &&
-        existing.sourceUpdatedAt.getTime() > balance.sourceUpdatedAt.getTime()
+        existing.sourceUpdatedAt.getTime() > validated.sourceUpdatedAt.getTime()
       ) {
         skipped += 1;
         continue;
       }
 
-      const upserted = await this.upsertIncomingBalance(balance);
+      const upserted = await this.upsertIncomingBalance(validated);
       await this.updateAtRiskFlags(upserted);
       processed += 1;
     }
@@ -108,8 +137,14 @@ export class SyncService {
     return { processed, failed: 0, skipped };
   }
 
-  private async upsertIncomingBalance(
+  private validateIncomingBalance(
     input: IncomingBalance,
+  ): ValidatedIncomingBalance {
+    return validateHcmBalancePayload(input);
+  }
+
+  private async upsertIncomingBalance(
+    input: ValidatedIncomingBalance,
   ): Promise<BalanceProjection> {
     const existing = await this.dependencies.balances.findByDimension(
       input.employeeId,

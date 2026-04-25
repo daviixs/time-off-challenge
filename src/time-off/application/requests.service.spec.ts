@@ -76,7 +76,14 @@ class InMemoryRequests {
         request.employeeId === employeeId &&
         request.locationId === locationId &&
         request.leaveType === leaveType &&
-        ['PENDING', 'APPROVED'].includes(request.status) &&
+        [
+          'PENDING',
+          'APPROVAL_IN_PROGRESS',
+          'APPROVAL_UNKNOWN',
+          'APPROVED',
+          'CANCELLATION_IN_PROGRESS',
+          'CANCELLATION_UNKNOWN',
+        ].includes(request.status) &&
         request.startDate <= endDate &&
         request.endDate >= startDate,
     );
@@ -101,7 +108,19 @@ class InMemoryRequests {
     return this.requests.find((request) => request.id === id) ?? null;
   }
 
-  async approvePending(): Promise<TimeOffRequest | null> {
+  async beginApproval(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async finalizeApproval(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async markApprovalUnknown(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async revertApprovalToPending(): Promise<TimeOffRequest | null> {
     throw new Error('Not used in create tests');
   }
 
@@ -109,8 +128,117 @@ class InMemoryRequests {
     throw new Error('Not used in create tests');
   }
 
-  async cancelRequest(): Promise<TimeOffRequest | null> {
+  async cancelPending(): Promise<TimeOffRequest | null> {
     throw new Error('Not used in create tests');
+  }
+
+  async beginCancellation(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async finalizeCancellation(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async markCancellationUnknown(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+
+  async revertCancellationToApproved(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in create tests');
+  }
+}
+
+class InMemoryRequestIdempotency {
+  private readonly records = new Map<
+    string,
+    {
+      idempotencyKey: string;
+      requestHash: string;
+      status: 'PENDING' | 'COMPLETED';
+      requestId: string | null;
+      responseBody: string | null;
+    }
+  >();
+
+  async findByKey(idempotencyKey: string) {
+    return this.records.get(idempotencyKey) ?? null;
+  }
+
+  async createPending(input: { idempotencyKey: string; requestHash: string }) {
+    const existing = this.records.get(input.idempotencyKey);
+    if (existing) {
+      return existing;
+    }
+
+    const record = {
+      idempotencyKey: input.idempotencyKey,
+      requestHash: input.requestHash,
+      status: 'PENDING' as const,
+      requestId: null,
+      responseBody: null,
+    };
+    this.records.set(input.idempotencyKey, record);
+    return record;
+  }
+
+  async complete(input: {
+    idempotencyKey: string;
+    requestId: string;
+    responseBody: string;
+  }) {
+    const existing = this.records.get(input.idempotencyKey);
+    if (existing) {
+      this.records.set(input.idempotencyKey, {
+        ...existing,
+        status: 'COMPLETED',
+        requestId: input.requestId,
+        responseBody: input.responseBody,
+      });
+    }
+  }
+
+  async deletePending(idempotencyKey: string) {
+    const existing = this.records.get(idempotencyKey);
+    if (existing?.status === 'PENDING') {
+      this.records.delete(idempotencyKey);
+    }
+  }
+}
+
+class FakeHcmOperations {
+  async findByKey() {
+    return null;
+  }
+
+  async createPending() {
+    throw new Error('Not used in create tests');
+  }
+
+  async resetToPending() {
+    throw new Error('Not used in create tests');
+  }
+
+  async markSuccess() {
+    throw new Error('Not used in create tests');
+  }
+
+  async markUnknown() {
+    throw new Error('Not used in create tests');
+  }
+
+  async markFailed() {
+    throw new Error('Not used in create tests');
+  }
+}
+
+class FakeLeases {
+  async acquire(): Promise<boolean> {
+    return true;
+  }
+
+  async release(): Promise<void> {
+    return undefined;
   }
 }
 
@@ -198,6 +326,10 @@ describe('RequestsService.createRequest', () => {
         now: () => new Date('2026-04-24T00:04:00.000Z'),
       },
       balanceTtlMs: 5 * 60 * 1000,
+      balanceDimensionLeaseTtlMs: 30_000,
+      idempotency: new InMemoryRequestIdempotency(),
+      operations: new FakeHcmOperations(),
+      leases: new FakeLeases(),
     });
   }
 

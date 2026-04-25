@@ -1,4 +1,5 @@
 import {
+  buildCreateRequestIdempotencyHash,
   buildHcmIdempotencyKey,
   calculateInclusiveDurationDays,
   isBalanceStale,
@@ -46,6 +47,28 @@ describe('time-off policy', () => {
   it('builds deterministic HCM idempotency keys', () => {
     expect(buildHcmIdempotencyKey('request-123', 'consume')).toBe(
       'time-off:request-123:consume:v1',
+    );
+  });
+
+  it('builds deterministic create request idempotency hashes', () => {
+    expect(
+      buildCreateRequestIdempotencyHash({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+        notes: 'Trip',
+      }),
+    ).toBe(
+      buildCreateRequestIdempotencyHash({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+        notes: 'Trip',
+      }),
     );
   });
 });

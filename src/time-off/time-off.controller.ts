@@ -27,11 +27,13 @@ export class TimeOffController {
   createRequest(
     @Headers('x-user-id') userId: string | undefined,
     @Headers('x-role') role: string | undefined,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: CreateTimeOffRequestDto,
   ) {
     return this.requestsService.createRequest(
       actorFromHeaders({ userId, role }),
       body,
+      { idempotencyKey },
     );
   }
 

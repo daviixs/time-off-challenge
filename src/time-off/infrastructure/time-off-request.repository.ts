@@ -15,6 +15,15 @@ type CreateRequestInput = Omit<
   'id' | 'createdAt' | 'updatedAt'
 >;
 
+const ACTIVE_OVERLAP_STATUSES = [
+  RequestStatus.PENDING,
+  RequestStatus.APPROVAL_IN_PROGRESS,
+  RequestStatus.APPROVAL_UNKNOWN,
+  RequestStatus.APPROVED,
+  RequestStatus.CANCELLATION_IN_PROGRESS,
+  RequestStatus.CANCELLATION_UNKNOWN,
+];
+
 @Injectable()
 export class TimeOffRequestRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -32,7 +41,7 @@ export class TimeOffRequestRepository {
         locationId,
         leaveType,
         status: {
-          in: [RequestStatus.PENDING, RequestStatus.APPROVED],
+          in: ACTIVE_OVERLAP_STATUSES,
         },
         startDate: {
           lte: endDate,
@@ -80,7 +89,21 @@ export class TimeOffRequestRepository {
     return request ? this.toDomain(request) : null;
   }
 
-  async approvePending(input: {
+  async beginApproval(requestId: string): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.PENDING,
+      },
+      data: {
+        status: RequestStatus.APPROVAL_IN_PROGRESS,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async finalizeApproval(input: {
     requestId: string;
     resolvedBy: string;
     managerNotes: string | null;
@@ -90,7 +113,7 @@ export class TimeOffRequestRepository {
     const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
       where: {
         id: input.requestId,
-        status: RequestStatus.PENDING,
+        status: RequestStatus.APPROVAL_IN_PROGRESS,
       },
       data: {
         status: RequestStatus.APPROVED,
@@ -98,6 +121,36 @@ export class TimeOffRequestRepository {
         resolvedAt: input.resolvedAt,
         managerNotes: input.managerNotes,
         hcmTransactionId: input.hcmTransactionId,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async markApprovalUnknown(requestId: string): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.APPROVAL_IN_PROGRESS,
+      },
+      data: {
+        status: RequestStatus.APPROVAL_UNKNOWN,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async revertApprovalToPending(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.APPROVAL_IN_PROGRESS,
+      },
+      data: {
+        status: RequestStatus.PENDING,
       },
     });
 
@@ -126,7 +179,7 @@ export class TimeOffRequestRepository {
     return updated[0] ? this.toDomain(updated[0]) : null;
   }
 
-  async cancelRequest(input: {
+  async cancelPending(input: {
     requestId: string;
     resolvedBy: string;
     statusReason: string | null;
@@ -135,15 +188,81 @@ export class TimeOffRequestRepository {
     const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
       where: {
         id: input.requestId,
-        status: {
-          in: [RequestStatus.PENDING, RequestStatus.APPROVED],
-        },
+        status: RequestStatus.PENDING,
       },
       data: {
         status: RequestStatus.CANCELLED,
         resolvedBy: input.resolvedBy,
         resolvedAt: input.resolvedAt,
         statusReason: input.statusReason,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async beginCancellation(requestId: string): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.APPROVED,
+      },
+      data: {
+        status: RequestStatus.CANCELLATION_IN_PROGRESS,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async finalizeCancellation(input: {
+    requestId: string;
+    resolvedBy: string;
+    statusReason: string | null;
+    resolvedAt: Date;
+  }): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: input.requestId,
+        status: RequestStatus.CANCELLATION_IN_PROGRESS,
+      },
+      data: {
+        status: RequestStatus.CANCELLED,
+        resolvedBy: input.resolvedBy,
+        resolvedAt: input.resolvedAt,
+        statusReason: input.statusReason,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async markCancellationUnknown(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.CANCELLATION_IN_PROGRESS,
+      },
+      data: {
+        status: RequestStatus.CANCELLATION_UNKNOWN,
+      },
+    });
+
+    return updated[0] ? this.toDomain(updated[0]) : null;
+  }
+
+  async revertCancellationToApproved(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const updated = await this.prisma.timeOffRequest.updateManyAndReturn({
+      where: {
+        id: requestId,
+        status: RequestStatus.CANCELLATION_IN_PROGRESS,
+      },
+      data: {
+        status: RequestStatus.APPROVED,
       },
     });
 

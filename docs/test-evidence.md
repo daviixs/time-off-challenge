@@ -25,10 +25,10 @@ Coverage from the latest local run:
 
 | Metric | Value |
 | --- | --- |
-| Statements | `72.8%` |
-| Branches | `55.42%` |
-| Functions | `55.42%` |
-| Lines | `71.7%` |
+| Statements | `70.63%` |
+| Branches | `52.7%` |
+| Functions | `63.41%` |
+| Lines | `69.6%` |
 
 ## High-Value Test Areas
 - Pure policy validation:
@@ -43,6 +43,8 @@ Coverage from the latest local run:
   [src/balances/application/balances.service.spec.ts](../src/balances/application/balances.service.spec.ts)
 - Batch/realtime sync precedence and `atRisk` propagation:
   [src/sync/application/sync.service.spec.ts](../src/sync/application/sync.service.spec.ts)
+- HCM semantic payload validation:
+  [src/hcm/hcm-client.service.spec.ts](../src/hcm/hcm-client.service.spec.ts)
 - Real Nest + Prisma integration:
   [src/integration/requests.integration.spec.ts](../src/integration/requests.integration.spec.ts)
 - Full HTTP flow with mock HCM:

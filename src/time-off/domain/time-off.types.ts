@@ -32,7 +32,11 @@ export type BalanceProjection = {
 
 export type TimeOffRequestStatus =
   | 'PENDING'
+  | 'APPROVAL_IN_PROGRESS'
+  | 'APPROVAL_UNKNOWN'
   | 'APPROVED'
+  | 'CANCELLATION_IN_PROGRESS'
+  | 'CANCELLATION_UNKNOWN'
   | 'REJECTED'
   | 'CANCELLED';
 

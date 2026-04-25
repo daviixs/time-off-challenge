@@ -172,6 +172,32 @@ describe('SyncService', () => {
     });
   });
 
+  it('skips stale realtime balances when a fresher projection already exists', async () => {
+    const balances = new InMemoryBalances([{ ...existingBalance }]);
+    const syncLogs = new InMemorySyncLogs();
+    const service = buildService({ balances, syncLogs });
+
+    const result = await service.syncRealtime({
+      triggeredBy: 'hcm-realtime',
+      balance: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        availableDays: 4,
+        sourceUpdatedAt: new Date('2026-04-24T00:02:00.000Z'),
+      },
+    });
+
+    expect(result).toEqual({ synced: false, skipped: true });
+    expect(balances.upserts).toHaveLength(0);
+    expect(syncLogs.entries.at(-1)).toMatchObject({
+      syncType: 'REALTIME',
+      status: 'SUCCESS',
+      recordsProcessed: 0,
+      skipped: 1,
+    });
+  });
+
   it('skips older batch records when a fresher projection already exists', async () => {
     const balances = new InMemoryBalances([{ ...existingBalance }]);
     const syncLogs = new InMemorySyncLogs();
@@ -225,6 +251,26 @@ describe('SyncService', () => {
       status: 'SUCCESS',
       recordsProcessed: 1,
       skipped: 0,
+    });
+  });
+
+  it('rejects invalid incoming balances with negative available days', async () => {
+    const service = buildService();
+
+    await expect(
+      service.syncRealtime({
+        triggeredBy: 'hcm-realtime',
+        balance: {
+          employeeId: 'emp-001',
+          locationId: 'loc-nyc',
+          leaveType: LeaveType.VACATION,
+          availableDays: -1,
+          sourceUpdatedAt: new Date('2026-04-24T00:11:00.000Z'),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_HCM_PAYLOAD',
+      statusCode: 502,
     });
   });
 });

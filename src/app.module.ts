@@ -4,16 +4,19 @@ import { AppController } from './app.controller';
 import { HcmOperationLogRepository } from './audit/infrastructure/hcm-operation-log.repository';
 import { BalancesService } from './balances/application/balances.service';
 import { BalancesController } from './balances/balances.controller';
+import { BalanceDimensionLeaseRepository } from './balances/infrastructure/balance-dimension-lease.repository';
 import { BalanceRepository } from './balances/infrastructure/balance.repository';
 import { SystemClock } from './common/clock/system-clock';
 import { EmployeeRepository } from './employees/infrastructure/employee.repository';
 import { HcmClientService } from './hcm/hcm-client.service';
+import { HcmOperationRepository } from './hcm/infrastructure/hcm-operation.repository';
 import { PrismaModule } from './prisma/prisma.module';
 import { SyncService } from './sync/application/sync.service';
 import { SyncController } from './sync/sync.controller';
 import { SyncLogRepository } from './sync/infrastructure/sync-log.repository';
 import { RequestQueryService } from './time-off/application/request-query.service';
 import { RequestsService } from './time-off/application/requests.service';
+import { RequestIdempotencyRepository } from './time-off/infrastructure/request-idempotency.repository';
 import { TimeOffController } from './time-off/time-off.controller';
 import { TimeOffRequestRepository } from './time-off/infrastructure/time-off-request.repository';
 
@@ -29,9 +32,12 @@ import { TimeOffRequestRepository } from './time-off/infrastructure/time-off-req
     SystemClock,
     EmployeeRepository,
     BalanceRepository,
+    BalanceDimensionLeaseRepository,
     TimeOffRequestRepository,
+    RequestIdempotencyRepository,
     SyncLogRepository,
     HcmOperationLogRepository,
+    HcmOperationRepository,
     HcmClientService,
     RequestQueryService,
     {
@@ -42,6 +48,9 @@ import { TimeOffRequestRepository } from './time-off/infrastructure/time-off-req
         requests: TimeOffRequestRepository,
         hcmClient: HcmClientService,
         clock: SystemClock,
+        idempotency: RequestIdempotencyRepository,
+        operations: HcmOperationRepository,
+        leases: BalanceDimensionLeaseRepository,
         configService: ConfigService,
       ) =>
         new RequestsService({
@@ -51,6 +60,12 @@ import { TimeOffRequestRepository } from './time-off/infrastructure/time-off-req
           hcmClient,
           clock,
           balanceTtlMs: Number(configService.get('BALANCE_TTL_MS') ?? 300000),
+          balanceDimensionLeaseTtlMs: Number(
+            configService.get('BALANCE_DIMENSION_LEASE_TTL_MS') ?? 30000,
+          ),
+          idempotency,
+          operations,
+          leases,
         }),
       inject: [
         EmployeeRepository,
@@ -58,6 +73,9 @@ import { TimeOffRequestRepository } from './time-off/infrastructure/time-off-req
         TimeOffRequestRepository,
         HcmClientService,
         SystemClock,
+        RequestIdempotencyRepository,
+        HcmOperationRepository,
+        BalanceDimensionLeaseRepository,
         ConfigService,
       ],
     },

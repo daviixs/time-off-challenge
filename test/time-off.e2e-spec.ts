@@ -72,6 +72,9 @@ describe('Time-off API (e2e)', () => {
 
   beforeEach(async () => {
     await prisma.hcmOperationLog.deleteMany();
+    await prisma.$executeRawUnsafe('DELETE FROM "RequestIdempotency"');
+    await prisma.$executeRawUnsafe('DELETE FROM "HcmOperation"');
+    await prisma.$executeRawUnsafe('DELETE FROM "BalanceDimensionLease"');
     await prisma.syncLog.deleteMany();
     await prisma.timeOffRequest.deleteMany();
     await prisma.balance.deleteMany();
@@ -158,6 +161,159 @@ describe('Time-off API (e2e)', () => {
       .expect(200);
 
     expect(balance.body.availableDays).toBe(7);
+  });
+
+  it('replays the original create response when the same Idempotency-Key is reused', async () => {
+    await request(app.getHttpServer())
+      .post('/sync/batch')
+      .send({
+        balances: [
+          {
+            employeeId: 'emp-001',
+            locationId: 'loc-nyc',
+            leaveType: 'VACATION',
+            availableDays: 10,
+            sourceUpdatedAt: '2026-04-24T00:00:00.000Z',
+          },
+        ],
+      })
+      .expect(201);
+
+    const first = await request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('x-user-id', 'emp-001')
+      .set('x-role', 'EMPLOYEE')
+      .set('idempotency-key', 'create-request-1')
+      .send({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+        notes: 'Trip',
+      })
+      .expect(201);
+
+    const replay = await request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('x-user-id', 'emp-001')
+      .set('x-role', 'EMPLOYEE')
+      .set('idempotency-key', 'create-request-1')
+      .send({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+        notes: 'Trip',
+      })
+      .expect(201);
+
+    expect(replay.body.id).toBe(first.body.id);
+    expect(replay.body).toEqual(first.body);
+
+    const rows = await prisma.timeOffRequest.findMany();
+    expect(rows).toHaveLength(1);
+  });
+
+  it('rejects reusing an Idempotency-Key with a different create payload', async () => {
+    await request(app.getHttpServer())
+      .post('/sync/batch')
+      .send({
+        balances: [
+          {
+            employeeId: 'emp-001',
+            locationId: 'loc-nyc',
+            leaveType: 'VACATION',
+            availableDays: 10,
+            sourceUpdatedAt: '2026-04-24T00:00:00.000Z',
+          },
+        ],
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('x-user-id', 'emp-001')
+      .set('x-role', 'EMPLOYEE')
+      .set('idempotency-key', 'create-request-2')
+      .send({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+        notes: 'Trip',
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('x-user-id', 'emp-001')
+      .set('x-role', 'EMPLOYEE')
+      .set('idempotency-key', 'create-request-2')
+      .send({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: '2026-05-01',
+        endDate: '2026-05-04',
+        notes: 'Trip',
+      })
+      .expect(409)
+      .expect((response) => {
+        expect(response.body.error).toBe('IDEMPOTENCY_KEY_REUSED');
+      });
+
+    const rows = await prisma.timeOffRequest.findMany();
+    expect(rows).toHaveLength(1);
+  });
+
+  it('rejects stale realtime sync events without overwriting a fresher projection', async () => {
+    await request(app.getHttpServer())
+      .post('/sync/batch')
+      .send({
+        balances: [
+          {
+            employeeId: 'emp-001',
+            locationId: 'loc-nyc',
+            leaveType: 'VACATION',
+            availableDays: 10,
+            sourceUpdatedAt: '2026-04-24T00:10:00.000Z',
+          },
+        ],
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post('/sync/realtime')
+      .send({
+        balance: {
+          employeeId: 'emp-001',
+          locationId: 'loc-nyc',
+          leaveType: 'VACATION',
+          availableDays: 4,
+          sourceUpdatedAt: '2026-04-24T00:05:00.000Z',
+        },
+      })
+      .expect(201)
+      .expect({
+        synced: false,
+        skipped: true,
+      });
+
+    const balance = await request(app.getHttpServer())
+      .get('/balances')
+      .set('x-user-id', 'emp-001')
+      .set('x-role', 'EMPLOYEE')
+      .query({
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+      })
+      .expect(200);
+
+    expect(balance.body.availableDays).toBe(10);
   });
 
   it('restores HCM balance when cancelling an approved request', async () => {

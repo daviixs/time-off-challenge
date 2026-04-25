@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { AppError } from '../common/errors/app-error';
 import { HcmOperationLogRepository } from '../audit/infrastructure/hcm-operation-log.repository';
+import { validateHcmBalancePayload } from './hcm-balance-payload';
 import {
   type BalanceProjection,
   type LeaveType,
@@ -49,6 +50,15 @@ export class HcmClientService {
         },
       );
 
+      const balance = this.toBalanceProjection(
+        {
+          employeeId,
+          locationId,
+          leaveType,
+        },
+        response.data,
+      );
+
       await this.hcmOperationLogRepository.create({
         operationType: 'GET_BALANCE',
         employeeId,
@@ -58,8 +68,21 @@ export class HcmClientService {
         responseCode: response.status,
       });
 
-      return this.toBalanceProjection(response.data);
+      return balance;
     } catch (error) {
+      if (error instanceof AppError) {
+        await this.hcmOperationLogRepository.create({
+          operationType: 'GET_BALANCE',
+          employeeId,
+          locationId,
+          leaveType,
+          status: 'FAILED',
+          errorCode: error.code,
+          errorMessage: error.message,
+        });
+        throw error;
+      }
+
       throw await this.normalizeError({
         operationType: 'GET_BALANCE',
         employeeId,
@@ -118,6 +141,15 @@ export class HcmClientService {
         },
       );
 
+      const balance = this.toBalanceProjection(
+        {
+          employeeId: input.employeeId,
+          locationId: input.locationId,
+          leaveType: input.leaveType,
+        },
+        response.data.balance,
+      );
+
       await this.hcmOperationLogRepository.create({
         idempotencyKey: input.idempotencyKey,
         operationType,
@@ -132,9 +164,25 @@ export class HcmClientService {
 
       return {
         transactionId: response.data.transactionId ?? input.idempotencyKey,
-        balance: this.toBalanceProjection(response.data.balance),
+        balance,
       };
     } catch (error) {
+      if (error instanceof AppError) {
+        await this.hcmOperationLogRepository.create({
+          idempotencyKey: input.idempotencyKey,
+          operationType,
+          requestId: input.requestId,
+          employeeId: input.employeeId,
+          locationId: input.locationId,
+          leaveType: input.leaveType,
+          payloadHash,
+          status: 'FAILED',
+          errorCode: error.code,
+          errorMessage: error.message,
+        });
+        throw error;
+      }
+
       throw await this.normalizeError({
         idempotencyKey: input.idempotencyKey,
         operationType,
@@ -161,18 +209,24 @@ export class HcmClientService {
     return baseUrl.replace(/\/$/, '');
   }
 
-  private toBalanceProjection(payload: HcmBalanceResponse): BalanceProjection {
+  private toBalanceProjection(
+    expected: {
+      employeeId: string;
+      locationId: string;
+      leaveType: LeaveType;
+    },
+    payload: HcmBalanceResponse,
+  ): BalanceProjection {
     const now = new Date();
+    const validated = validateHcmBalancePayload(payload, expected);
 
     return {
-      employeeId: payload.employeeId,
-      locationId: payload.locationId,
-      leaveType: payload.leaveType,
-      availableDays: payload.availableDays,
+      employeeId: validated.employeeId,
+      locationId: validated.locationId,
+      leaveType: validated.leaveType,
+      availableDays: validated.availableDays,
       lastSyncedAt: now,
-      sourceUpdatedAt: payload.sourceUpdatedAt
-        ? new Date(payload.sourceUpdatedAt)
-        : now,
+      sourceUpdatedAt: validated.sourceUpdatedAt,
       version: 1,
       createdAt: now,
       updatedAt: now,

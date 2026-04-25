@@ -3,6 +3,7 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsNotEmpty,
   IsNumber,
   IsString,
   ValidateNested,
@@ -11,9 +12,11 @@ import { LeaveType } from '../../time-off/domain/time-off.types';
 
 class BatchBalanceDto {
   @IsString()
+  @IsNotEmpty()
   employeeId!: string;
 
   @IsString()
+  @IsNotEmpty()
   locationId!: string;
 
   @IsEnum(LeaveType)

@@ -72,7 +72,17 @@ class InMemoryRequests {
     return this.requests.find((request) => request.id === id) ?? null;
   }
 
-  async approvePending(input: {
+  async beginApproval(requestId: string): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'PENDING') {
+      return null;
+    }
+
+    request.status = 'APPROVAL_IN_PROGRESS';
+    return request;
+  }
+
+  async finalizeApproval(input: {
     requestId: string;
     resolvedBy: string;
     managerNotes: string | null;
@@ -80,7 +90,7 @@ class InMemoryRequests {
     hcmTransactionId: string;
   }): Promise<TimeOffRequest | null> {
     const request = this.requests.find((item) => item.id === input.requestId);
-    if (!request || request.status !== 'PENDING') {
+    if (!request || request.status !== 'APPROVAL_IN_PROGRESS') {
       return null;
     }
 
@@ -93,12 +103,175 @@ class InMemoryRequests {
     return request;
   }
 
+  async markApprovalUnknown(requestId: string): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'APPROVAL_IN_PROGRESS') {
+      return null;
+    }
+
+    request.status = 'APPROVAL_UNKNOWN';
+    return request;
+  }
+
+  async revertApprovalToPending(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'APPROVAL_IN_PROGRESS') {
+      return null;
+    }
+
+    request.status = 'PENDING';
+    return request;
+  }
+
   async rejectPending(): Promise<TimeOffRequest | null> {
     throw new Error('Not used in approval tests');
   }
 
-  async cancelRequest(): Promise<TimeOffRequest | null> {
+  async cancelPending(): Promise<TimeOffRequest | null> {
     throw new Error('Not used in approval tests');
+  }
+
+  async beginCancellation(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in approval tests');
+  }
+
+  async finalizeCancellation(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in approval tests');
+  }
+
+  async markCancellationUnknown(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in approval tests');
+  }
+
+  async revertCancellationToApproved(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in approval tests');
+  }
+}
+
+class FakeRequestIdempotency {
+  async findByKey() {
+    return null;
+  }
+
+  async createPending() {
+    throw new Error('Not used in approval tests');
+  }
+
+  async complete() {
+    throw new Error('Not used in approval tests');
+  }
+
+  async deletePending() {
+    return undefined;
+  }
+}
+
+class FakeHcmOperations {
+  private readonly records = new Map<
+    string,
+    {
+      requestId: string;
+      operationType: 'CONSUME' | 'RESTORE';
+      idempotencyKey: string;
+      status: 'PENDING' | 'SUCCESS' | 'UNKNOWN' | 'FAILED';
+      transactionId: string | null;
+      responseBody: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }
+  >();
+
+  async findByKey(idempotencyKey: string) {
+    return this.records.get(idempotencyKey) ?? null;
+  }
+
+  async createPending(input: {
+    requestId: string;
+    operationType: 'CONSUME' | 'RESTORE';
+    idempotencyKey: string;
+  }) {
+    const record = {
+      requestId: input.requestId,
+      operationType: input.operationType,
+      idempotencyKey: input.idempotencyKey,
+      status: 'PENDING' as const,
+      transactionId: null,
+      responseBody: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+    this.records.set(input.idempotencyKey, record);
+    return record;
+  }
+
+  async resetToPending(idempotencyKey: string) {
+    const record = this.records.get(idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'PENDING';
+    record.errorCode = null;
+    record.errorMessage = null;
+    return record;
+  }
+
+  async markSuccess(input: {
+    idempotencyKey: string;
+    transactionId: string;
+    responseBody: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'SUCCESS';
+    record.transactionId = input.transactionId;
+    record.responseBody = input.responseBody;
+    record.errorCode = null;
+    record.errorMessage = null;
+    return record;
+  }
+
+  async markUnknown(input: {
+    idempotencyKey: string;
+    errorCode: string;
+    errorMessage: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'UNKNOWN';
+    record.errorCode = input.errorCode;
+    record.errorMessage = input.errorMessage;
+    return record;
+  }
+
+  async markFailed(input: {
+    idempotencyKey: string;
+    errorCode: string;
+    errorMessage: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'FAILED';
+    record.errorCode = input.errorCode;
+    record.errorMessage = input.errorMessage;
+    return record;
+  }
+}
+
+class FakeLeases {
+  async acquire(): Promise<boolean> {
+    return true;
+  }
+
+  async release(): Promise<void> {
+    return undefined;
   }
 }
 
@@ -236,24 +409,34 @@ describe('RequestsService.approveRequest', () => {
         now: () => new Date('2026-04-24T00:05:00.000Z'),
       },
       balanceTtlMs: 5 * 60 * 1000,
+      balanceDimensionLeaseTtlMs: 30_000,
+      idempotency: new FakeRequestIdempotency(),
+      operations: new FakeHcmOperations(),
+      leases: new FakeLeases(),
     });
   }
 
   it('approves a pending request only after HCM confirms the balance consumption', async () => {
     const balances = new InMemoryBalances([{ ...balance }]);
     const requests = new InMemoryRequests([{ ...pendingRequest }]);
+    const statusAtConsume: string[] = [];
     const hcmClient = new FakeHcmClient({
       getBalance: async () => ({ ...balance }),
-      consume: async () => ({
-        transactionId: 'hcm-tx-001',
-        balance: {
-          ...balance,
-          availableDays: 7,
-          version: 2,
-          lastSyncedAt: new Date('2026-04-24T00:05:00.000Z'),
-          updatedAt: new Date('2026-04-24T00:05:00.000Z'),
-        },
-      }),
+      consume: async () => {
+        statusAtConsume.push(
+          (await requests.findById(pendingRequest.id))?.status ?? 'missing',
+        );
+        return {
+          transactionId: 'hcm-tx-001',
+          balance: {
+            ...balance,
+            availableDays: 7,
+            version: 2,
+            lastSyncedAt: new Date('2026-04-24T00:05:00.000Z'),
+            updatedAt: new Date('2026-04-24T00:05:00.000Z'),
+          },
+        };
+      },
     });
     const service = buildService({ balances, requests, hcmClient });
 
@@ -269,6 +452,7 @@ describe('RequestsService.approveRequest', () => {
     expect(hcmClient.consumed).toEqual([
       'request-1:3:time-off:request-1:consume:v1',
     ]);
+    expect(statusAtConsume).toEqual(['APPROVAL_IN_PROGRESS']);
     expect(balances.updates.at(-1)?.availableDays).toBe(7);
   });
 

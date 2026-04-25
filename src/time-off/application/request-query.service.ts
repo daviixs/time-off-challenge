@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { AppError } from '../../common/errors/app-error';
-import { type Actor, Role } from '../domain/time-off.types';
+import {
+  type Actor,
+  Role,
+  type TimeOffRequestStatus,
+} from '../domain/time-off.types';
 import { TimeOffRequestRepository } from '../infrastructure/time-off-request.repository';
 
 @Injectable()
@@ -29,7 +33,7 @@ export class RequestQueryService {
     actor: Actor,
     filters: {
       employeeId?: string;
-      status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+      status?: TimeOffRequestStatus;
     },
   ) {
     if (

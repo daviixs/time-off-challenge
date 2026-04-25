@@ -62,6 +62,10 @@ describe('RequestsService integration', () => {
   beforeEach(async () => {
     jest.resetAllMocks();
     await prisma.hcmOperationLog.deleteMany();
+    // future-proof for hardening tables
+    await prisma.$executeRawUnsafe('DELETE FROM "RequestIdempotency"');
+    await prisma.$executeRawUnsafe('DELETE FROM "HcmOperation"');
+    await prisma.$executeRawUnsafe('DELETE FROM "BalanceDimensionLease"');
     await prisma.syncLog.deleteMany();
     await prisma.timeOffRequest.deleteMany();
     await prisma.balance.deleteMany();
@@ -204,5 +208,149 @@ describe('RequestsService integration', () => {
     });
 
     expect(storedRequest.status).toBe('PENDING');
+  });
+
+  it('moves the request to APPROVAL_UNKNOWN and persists an UNKNOWN HCM operation when the consume result is ambiguous', async () => {
+    hcmClientMock.getBalance.mockResolvedValue({
+      employeeId: 'emp-001',
+      locationId: 'loc-nyc',
+      leaveType: LeaveType.VACATION,
+      availableDays: 10,
+      lastSyncedAt: new Date('2026-04-24T00:01:00.000Z'),
+      sourceUpdatedAt: new Date('2026-04-24T00:01:00.000Z'),
+      version: 2,
+      createdAt: new Date('2026-04-24T00:01:00.000Z'),
+      updatedAt: new Date('2026-04-24T00:01:00.000Z'),
+    });
+    hcmClientMock.consumeBalance.mockRejectedValue(
+      new AppError(
+        'HCM_RESULT_UNKNOWN',
+        503,
+        'HCM timed out before confirming the operation result.',
+      ),
+    );
+
+    const created = await requestsService.createRequest(
+      { userId: 'emp-001', role: Role.EMPLOYEE },
+      {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+      },
+    );
+
+    await expect(
+      requestsService.approveRequest(
+        { userId: 'mgr-001', role: Role.MANAGER },
+        created.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'HCM_RESULT_UNKNOWN',
+      statusCode: 503,
+    });
+
+    const storedRequest = await prisma.timeOffRequest.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    const operation = await prisma.hcmOperation.findUniqueOrThrow({
+      where: {
+        idempotencyKey: `time-off:${created.id}:consume:v1`,
+      },
+    });
+
+    expect(storedRequest.status).toBe('APPROVAL_UNKNOWN');
+    expect(operation.status).toBe('UNKNOWN');
+  });
+
+  it('reuses a SUCCESS consume operation without calling HCM again', async () => {
+    const created = await prisma.timeOffRequest.create({
+      data: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: new Date('2026-05-01T00:00:00.000Z'),
+        endDate: new Date('2026-05-03T00:00:00.000Z'),
+        durationDays: 3,
+        status: 'APPROVAL_IN_PROGRESS',
+      },
+    });
+
+    await prisma.hcmOperation.create({
+      data: {
+        requestId: created.id,
+        operationType: 'CONSUME',
+        idempotencyKey: `time-off:${created.id}:consume:v1`,
+        status: 'SUCCESS',
+        transactionId: 'hcm-tx-001',
+        responseBody: JSON.stringify({
+          transactionId: 'hcm-tx-001',
+          balance: {
+            employeeId: 'emp-001',
+            locationId: 'loc-nyc',
+            leaveType: 'VACATION',
+            availableDays: 7,
+            sourceUpdatedAt: '2026-04-24T00:02:00.000Z',
+          },
+        }),
+      },
+    });
+
+    const approved = await requestsService.approveRequest(
+      { userId: 'mgr-001', role: Role.MANAGER },
+      created.id,
+      { notes: 'Approved' },
+    );
+
+    expect(approved.status).toBe('APPROVED');
+    expect(hcmClientMock.consumeBalance).not.toHaveBeenCalled();
+  });
+
+  it('rejects approval when the balance dimension lease is already held', async () => {
+    hcmClientMock.getBalance.mockResolvedValue({
+      employeeId: 'emp-001',
+      locationId: 'loc-nyc',
+      leaveType: LeaveType.VACATION,
+      availableDays: 10,
+      lastSyncedAt: new Date('2026-04-24T00:01:00.000Z'),
+      sourceUpdatedAt: new Date('2026-04-24T00:01:00.000Z'),
+      version: 2,
+      createdAt: new Date('2026-04-24T00:01:00.000Z'),
+      updatedAt: new Date('2026-04-24T00:01:00.000Z'),
+    });
+
+    const created = await requestsService.createRequest(
+      { userId: 'emp-001', role: Role.EMPLOYEE },
+      {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+      },
+    );
+
+    await prisma.balanceDimensionLease.create({
+      data: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        holderId: 'existing-holder',
+        expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+      },
+    });
+
+    await expect(
+      requestsService.approveRequest(
+        { userId: 'mgr-001', role: Role.MANAGER },
+        created.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'BALANCE_DIMENSION_LOCKED',
+      statusCode: 409,
+    });
   });
 });

@@ -19,7 +19,11 @@ enum LeaveType {
 
 enum RequestStatus {
   PENDING
+  APPROVAL_IN_PROGRESS
+  APPROVAL_UNKNOWN
   APPROVED
+  CANCELLATION_IN_PROGRESS
+  CANCELLATION_UNKNOWN
   REJECTED
   CANCELLED
 }
@@ -45,6 +49,23 @@ enum HcmOperationStatus {
   SUCCESS
   FAILED
   UNKNOWN
+}
+
+enum RequestIdempotencyStatus {
+  PENDING
+  COMPLETED
+}
+
+enum DurableHcmOperationType {
+  CONSUME
+  RESTORE
+}
+
+enum DurableHcmOperationStatus {
+  PENDING
+  SUCCESS
+  UNKNOWN
+  FAILED
 }
 
 model Employee {
@@ -128,4 +149,40 @@ model HcmOperationLog {
 
   @@index([requestId, operationType])
   @@index([employeeId, locationId, leaveType])
+}
+
+model RequestIdempotency {
+  idempotencyKey String                   @id
+  requestHash    String
+  status         RequestIdempotencyStatus
+  requestId      String?
+  responseBody   String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+}
+
+model HcmOperation {
+  id             String                   @id @default(uuid())
+  requestId      String
+  operationType  DurableHcmOperationType
+  idempotencyKey String                   @unique
+  status         DurableHcmOperationStatus
+  transactionId  String?
+  responseBody   String?
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@index([requestId, operationType])
+}
+
+model BalanceDimensionLease {
+  employeeId String
+  locationId String
+  leaveType  LeaveType
+  holderId   String
+  expiresAt  DateTime
+
+  @@id([employeeId, locationId, leaveType])
 }

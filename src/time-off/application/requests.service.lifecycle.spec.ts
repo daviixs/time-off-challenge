@@ -72,7 +72,19 @@ class InMemoryRequests {
     return this.requests.find((request) => request.id === id) ?? null;
   }
 
-  async approvePending(): Promise<TimeOffRequest | null> {
+  async beginApproval(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in lifecycle tests');
+  }
+
+  async finalizeApproval(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in lifecycle tests');
+  }
+
+  async markApprovalUnknown(): Promise<TimeOffRequest | null> {
+    throw new Error('Not used in lifecycle tests');
+  }
+
+  async revertApprovalToPending(): Promise<TimeOffRequest | null> {
     throw new Error('Not used in lifecycle tests');
   }
 
@@ -95,17 +107,14 @@ class InMemoryRequests {
     return request;
   }
 
-  async cancelRequest(input: {
+  async cancelPending(input: {
     requestId: string;
     resolvedBy: string;
     statusReason: string | null;
     resolvedAt: Date;
   }): Promise<TimeOffRequest | null> {
     const request = this.requests.find((item) => item.id === input.requestId);
-    if (
-      !request ||
-      (request.status !== 'PENDING' && request.status !== 'APPROVED')
-    ) {
+    if (!request || request.status !== 'PENDING') {
       return null;
     }
 
@@ -115,6 +124,184 @@ class InMemoryRequests {
     request.statusReason = input.statusReason;
     request.updatedAt = input.resolvedAt;
     return request;
+  }
+
+  async beginCancellation(requestId: string): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'APPROVED') {
+      return null;
+    }
+
+    request.status = 'CANCELLATION_IN_PROGRESS';
+    return request;
+  }
+
+  async finalizeCancellation(input: {
+    requestId: string;
+    resolvedBy: string;
+    statusReason: string | null;
+    resolvedAt: Date;
+  }): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === input.requestId);
+    if (!request || request.status !== 'CANCELLATION_IN_PROGRESS') {
+      return null;
+    }
+
+    request.status = 'CANCELLED';
+    request.resolvedBy = input.resolvedBy;
+    request.resolvedAt = input.resolvedAt;
+    request.statusReason = input.statusReason;
+    request.updatedAt = input.resolvedAt;
+    return request;
+  }
+
+  async markCancellationUnknown(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'CANCELLATION_IN_PROGRESS') {
+      return null;
+    }
+
+    request.status = 'CANCELLATION_UNKNOWN';
+    return request;
+  }
+
+  async revertCancellationToApproved(
+    requestId: string,
+  ): Promise<TimeOffRequest | null> {
+    const request = this.requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'CANCELLATION_IN_PROGRESS') {
+      return null;
+    }
+
+    request.status = 'APPROVED';
+    return request;
+  }
+}
+
+class FakeRequestIdempotency {
+  async findByKey() {
+    return null;
+  }
+
+  async createPending() {
+    throw new Error('Not used in lifecycle tests');
+  }
+
+  async complete() {
+    throw new Error('Not used in lifecycle tests');
+  }
+
+  async deletePending() {
+    return undefined;
+  }
+}
+
+class FakeHcmOperations {
+  private readonly records = new Map<
+    string,
+    {
+      requestId: string;
+      operationType: 'CONSUME' | 'RESTORE';
+      idempotencyKey: string;
+      status: 'PENDING' | 'SUCCESS' | 'UNKNOWN' | 'FAILED';
+      transactionId: string | null;
+      responseBody: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }
+  >();
+
+  async findByKey(idempotencyKey: string) {
+    return this.records.get(idempotencyKey) ?? null;
+  }
+
+  async createPending(input: {
+    requestId: string;
+    operationType: 'CONSUME' | 'RESTORE';
+    idempotencyKey: string;
+  }) {
+    const record = {
+      requestId: input.requestId,
+      operationType: input.operationType,
+      idempotencyKey: input.idempotencyKey,
+      status: 'PENDING' as const,
+      transactionId: null,
+      responseBody: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+    this.records.set(input.idempotencyKey, record);
+    return record;
+  }
+
+  async resetToPending(idempotencyKey: string) {
+    const record = this.records.get(idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'PENDING';
+    record.errorCode = null;
+    record.errorMessage = null;
+    return record;
+  }
+
+  async markSuccess(input: {
+    idempotencyKey: string;
+    transactionId: string;
+    responseBody: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'SUCCESS';
+    record.transactionId = input.transactionId;
+    record.responseBody = input.responseBody;
+    record.errorCode = null;
+    record.errorMessage = null;
+    return record;
+  }
+
+  async markUnknown(input: {
+    idempotencyKey: string;
+    errorCode: string;
+    errorMessage: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'UNKNOWN';
+    record.errorCode = input.errorCode;
+    record.errorMessage = input.errorMessage;
+    return record;
+  }
+
+  async markFailed(input: {
+    idempotencyKey: string;
+    errorCode: string;
+    errorMessage: string;
+  }) {
+    const record = this.records.get(input.idempotencyKey);
+    if (!record) {
+      throw new Error('missing operation');
+    }
+    record.status = 'FAILED';
+    record.errorCode = input.errorCode;
+    record.errorMessage = input.errorMessage;
+    return record;
+  }
+}
+
+class FakeLeases {
+  async acquire(): Promise<boolean> {
+    return true;
+  }
+
+  async release(): Promise<void> {
+    return undefined;
   }
 }
 
@@ -243,6 +430,10 @@ describe('RequestsService reject and cancel lifecycle', () => {
         now: () => new Date('2026-04-24T00:06:00.000Z'),
       },
       balanceTtlMs: 5 * 60 * 1000,
+      balanceDimensionLeaseTtlMs: 30_000,
+      idempotency: new FakeRequestIdempotency(),
+      operations: new FakeHcmOperations(),
+      leases: new FakeLeases(),
     });
   }
 
@@ -285,16 +476,22 @@ describe('RequestsService reject and cancel lifecycle', () => {
   it('restores approved balance through HCM before cancelling an approved request', async () => {
     const requests = new InMemoryRequests([{ ...approvedRequest }]);
     const balances = new InMemoryBalances([{ ...balance }]);
-    const hcmClient = new FakeHcmClient(async () => ({
-      transactionId: 'hcm-tx-restore-001',
-      balance: {
-        ...balance,
-        availableDays: 10,
-        version: 3,
-        updatedAt: new Date('2026-04-24T00:06:00.000Z'),
-        lastSyncedAt: new Date('2026-04-24T00:06:00.000Z'),
-      },
-    }));
+    const statusAtRestore: string[] = [];
+    const hcmClient = new FakeHcmClient(async () => {
+      statusAtRestore.push(
+        (await requests.findById(approvedRequest.id))?.status ?? 'missing',
+      );
+      return {
+        transactionId: 'hcm-tx-restore-001',
+        balance: {
+          ...balance,
+          availableDays: 10,
+          version: 3,
+          updatedAt: new Date('2026-04-24T00:06:00.000Z'),
+          lastSyncedAt: new Date('2026-04-24T00:06:00.000Z'),
+        },
+      };
+    });
     const service = buildService({ requests, balances, hcmClient });
 
     const cancelled = await service.cancelRequest(
@@ -307,7 +504,35 @@ describe('RequestsService reject and cancel lifecycle', () => {
     expect(hcmClient.restored).toEqual([
       'request-approved:3:time-off:request-approved:restore:v1',
     ]);
+    expect(statusAtRestore).toEqual(['CANCELLATION_IN_PROGRESS']);
     expect(balances.updates.at(-1)?.availableDays).toBe(10);
+  });
+
+  it('moves approved cancellation to CANCELLATION_UNKNOWN when HCM restore is ambiguous', async () => {
+    const requests = new InMemoryRequests([{ ...approvedRequest }]);
+    const hcmClient = new FakeHcmClient(async () => {
+      throw new AppError(
+        'HCM_RESULT_UNKNOWN',
+        503,
+        'HCM timed out before confirming the operation result.',
+      );
+    });
+    const service = buildService({ requests, hcmClient });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        { reason: 'Plans changed' },
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'HCM_RESULT_UNKNOWN',
+      statusCode: 503,
+    });
+
+    expect((await requests.findById(approvedRequest.id))?.status).toBe(
+      'CANCELLATION_UNKNOWN',
+    );
   });
 
   it('forbids employees from cancelling other employees requests', async () => {

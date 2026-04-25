@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsDateString,
   IsEnum,
+  IsNotEmpty,
   IsNumber,
   IsObject,
   IsString,
@@ -10,9 +11,11 @@ import { LeaveType } from '../../time-off/domain/time-off.types';
 
 class RealtimeBalanceDto {
   @IsString()
+  @IsNotEmpty()
   employeeId!: string;
 
   @IsString()
+  @IsNotEmpty()
   locationId!: string;
 
   @IsEnum(LeaveType)
