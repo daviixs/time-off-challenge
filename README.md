@@ -7,6 +7,7 @@
 ![Jest](https://img.shields.io/badge/Jest-Tested-C21325?logo=jest&logoColor=white)
 ![Coverage](https://img.shields.io/badge/Coverage-83.12%25%20branches-2EA043)
 ![Status](https://img.shields.io/badge/Take--Home-Backend%20Challenge-0A66C2)
+**Repository:** [github.com/daviixs/time-off-service](https://github.com/daviixs/...)
 
 > Backend microservice for managing time-off requests with **HCM as the source of truth for balances** and **local state responsible for the request workflow**.
 > The solution prioritizes balance integrity, defensive synchronization, auditing, idempotency, and quality evidence through tests.
