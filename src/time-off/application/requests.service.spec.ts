@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/require-await */
 
 import { AppError } from '../../common/errors/app-error';
+import { buildCreateRequestIdempotencyHash } from '../../shared/domain/time-off-policy';
 import {
   type BalanceProjection,
   type CreateTimeOffRequestInput,
@@ -161,6 +162,20 @@ class InMemoryRequestIdempotency {
     }
   >();
 
+  constructor(
+    initialRecords: Array<{
+      idempotencyKey: string;
+      requestHash: string;
+      status: 'PENDING' | 'COMPLETED';
+      requestId: string | null;
+      responseBody: string | null;
+    }> = [],
+  ) {
+    for (const record of initialRecords) {
+      this.records.set(record.idempotencyKey, record);
+    }
+  }
+
   async findByKey(idempotencyKey: string) {
     return this.records.get(idempotencyKey) ?? null;
   }
@@ -233,8 +248,10 @@ class FakeHcmOperations {
 }
 
 class FakeLeases {
+  constructor(private readonly acquireResult = true) {}
+
   async acquire(): Promise<boolean> {
-    return true;
+    return this.acquireResult;
   }
 
   async release(): Promise<void> {
@@ -307,6 +324,8 @@ describe('RequestsService.createRequest', () => {
     balances?: InMemoryBalances;
     requests?: InMemoryRequests;
     hcmClient?: FakeHcmClient;
+    idempotency?: InMemoryRequestIdempotency;
+    leases?: FakeLeases;
   }): RequestsService {
     return new RequestsService({
       employees:
@@ -327,9 +346,9 @@ describe('RequestsService.createRequest', () => {
       },
       balanceTtlMs: 5 * 60 * 1000,
       balanceDimensionLeaseTtlMs: 30_000,
-      idempotency: new InMemoryRequestIdempotency(),
+      idempotency: overrides?.idempotency ?? new InMemoryRequestIdempotency(),
       operations: new FakeHcmOperations(),
-      leases: new FakeLeases(),
+      leases: overrides?.leases ?? new FakeLeases(),
     });
   }
 
@@ -356,6 +375,117 @@ describe('RequestsService.createRequest', () => {
     expect(created.status).toBe<TimeOffRequestStatus>('PENDING');
     expect(created.durationDays).toBe(3);
     expect(requests.created).toHaveLength(1);
+  });
+
+  it('replays the original response for the same idempotency key and payload', async () => {
+    const requests = new InMemoryRequests();
+    const idempotency = new InMemoryRequestIdempotency();
+    const service = buildService({ requests, idempotency });
+
+    const first = await service.createRequest(
+      { userId: employee.id, role: employee.role },
+      requestInput(),
+      { idempotencyKey: 'create-key-1' },
+    );
+    const replay = await service.createRequest(
+      { userId: employee.id, role: employee.role },
+      requestInput(),
+      { idempotencyKey: 'create-key-1' },
+    );
+
+    expect(replay).toEqual(first);
+    expect(requests.created).toHaveLength(1);
+  });
+
+  it('rejects idempotency key reuse with a different payload', async () => {
+    const idempotency = new InMemoryRequestIdempotency();
+    const service = buildService({ idempotency });
+
+    await service.createRequest(
+      { userId: employee.id, role: employee.role },
+      requestInput(),
+      { idempotencyKey: 'create-key-2' },
+    );
+
+    await expect(
+      service.createRequest(
+        { userId: employee.id, role: employee.role },
+        {
+          ...requestInput(),
+          endDate: '2026-05-04',
+        },
+        { idempotencyKey: 'create-key-2' },
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects a duplicate create while the idempotency key is still pending', async () => {
+    const input = requestInput();
+    const idempotency = new InMemoryRequestIdempotency([
+      {
+        idempotencyKey: 'pending-key',
+        requestHash: buildCreateRequestIdempotencyHash({
+          employeeId: input.employeeId,
+          locationId: input.locationId,
+          leaveType: input.leaveType,
+          startDate: input.startDate,
+          endDate: input.endDate,
+          notes: input.notes ?? null,
+        }),
+        status: 'PENDING',
+        requestId: null,
+        responseBody: null,
+      },
+    ]);
+    const service = buildService({ idempotency });
+
+    await expect(
+      service.createRequest(
+        { userId: employee.id, role: employee.role },
+        input,
+        { idempotencyKey: 'pending-key' },
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'IDEMPOTENCY_KEY_IN_PROGRESS',
+      statusCode: 409,
+    });
+  });
+
+  it('deletes a pending idempotency row when create fails', async () => {
+    const idempotency = new InMemoryRequestIdempotency();
+    const service = buildService({
+      employees: new InMemoryEmployees([]),
+      idempotency,
+    });
+
+    await expect(
+      service.createRequest(
+        { userId: employee.id, role: employee.role },
+        requestInput(),
+        { idempotencyKey: 'create-key-3' },
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'EMPLOYEE_NOT_FOUND',
+      statusCode: 404,
+    });
+    await expect(idempotency.findByKey('create-key-3')).resolves.toBeNull();
+  });
+
+  it('rejects create when the balance dimension lease is held', async () => {
+    const service = buildService({ leases: new FakeLeases(false) });
+
+    await expect(
+      service.createRequest(
+        { userId: employee.id, role: employee.role },
+        requestInput(),
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'BALANCE_DIMENSION_LOCKED',
+      statusCode: 409,
+    });
   });
 
   it('refreshes a stale balance projection from HCM before creating the request', async () => {

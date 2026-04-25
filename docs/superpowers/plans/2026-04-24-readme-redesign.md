@@ -13,6 +13,7 @@
 ### Task 1: Re-establish README Structure
 
 **Files:**
+
 - Modify: `README.md`
 - Reference: `docs/time-off-microservice-trd.md`
 - Reference: `docs/test-evidence.md`
@@ -38,11 +39,17 @@ Expected: Existing README is functional but does not yet match the target sectio
 # Time-Off Microservice
 
 ## Overview
+
 ## Challenge Context
+
 ## Problem
+
 ## Personas
+
 ## Architecture
+
 ## Diagrams
+
 ...
 ```
 
@@ -61,13 +68,15 @@ git commit -m "docs: restructure README for evaluation"
 ### Task 2: Add Architecture Narrative and Diagrams
 
 **Files:**
+
 - Modify: `README.md`
 - Reference: `docs/time-off-microservice-trd.md`
 
 - [ ] **Step 1: Write the architecture and diagram content block**
 
-```markdown
+````markdown
 ## Architecture
+
 - HCM as source of truth
 - SQLite as workflow state and projection cache
 - Revalidation before approval
@@ -76,6 +85,7 @@ git commit -m "docs: restructure README for evaluation"
 [ Employee ] --> [ API Instance A ]
 [ Manager  ] --> [ API Instance B ]
 ```
+````
 
 ```mermaid
 sequenceDiagram
@@ -84,7 +94,8 @@ sequenceDiagram
   participant Cache
   participant HCM
 ```
-```
+
+````
 
 - [ ] **Step 2: Verify diagrams render as valid Markdown blocks**
 
@@ -95,7 +106,7 @@ Expected: One ASCII architecture block and five Mermaid blocks are present.
 
 ```markdown
 This flow exists to prevent stale local approval decisions when HCM changed independently.
-```
+````
 
 - [ ] **Step 4: Verify the README explains the diagrams rather than only embedding them**
 
@@ -112,6 +123,7 @@ git commit -m "docs: add README architecture diagrams"
 ### Task 3: Add Execution, API, and Evidence Sections
 
 **Files:**
+
 - Modify: `README.md`
 - Reference: `package.json`
 - Reference: `scripts/mock-hcm-server.js`
@@ -121,17 +133,21 @@ git commit -m "docs: add README architecture diagrams"
 
 ```markdown
 ## How to Run
+
 ### Local Execution
+
 ### Containerization Note
 
 ## Environment Variables
+
 | Variable | Purpose | Required |
 ```
 
 - [ ] **Step 2: Add API endpoint tables and payload examples**
 
-```markdown
+````markdown
 ## API Endpoints
+
 | Method | Path | Description |
 
 ```json
@@ -141,7 +157,9 @@ git commit -m "docs: add README architecture diagrams"
   "leaveType": "VACATION"
 }
 ```
-```
+````
+
+````
 
 - [ ] **Step 3: Add testing, mock HCM, critical scenarios, limitations, and next steps**
 
@@ -155,7 +173,7 @@ git commit -m "docs: add README architecture diagrams"
 ## Critical Scenarios Covered
 ## Known Limitations
 ## Next Steps
-```
+````
 
 - [ ] **Step 4: Verify factual consistency against scripts and docs**
 
@@ -172,6 +190,7 @@ git commit -m "docs: add README execution and evidence sections"
 ### Task 4: Final Editorial Pass
 
 **Files:**
+
 - Modify: `README.md`
 
 - [ ] **Step 1: Tighten language for evaluator readability**

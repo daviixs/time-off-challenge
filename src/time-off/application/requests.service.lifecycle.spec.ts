@@ -213,6 +213,23 @@ class FakeHcmOperations {
     }
   >();
 
+  constructor(
+    initialRecords: Array<{
+      requestId: string;
+      operationType: 'CONSUME' | 'RESTORE';
+      idempotencyKey: string;
+      status: 'PENDING' | 'SUCCESS' | 'UNKNOWN' | 'FAILED';
+      transactionId: string | null;
+      responseBody: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }> = [],
+  ) {
+    for (const record of initialRecords) {
+      this.records.set(record.idempotencyKey, record);
+    }
+  }
+
   async findByKey(idempotencyKey: string) {
     return this.records.get(idempotencyKey) ?? null;
   }
@@ -296,8 +313,10 @@ class FakeHcmOperations {
 }
 
 class FakeLeases {
+  constructor(private readonly acquireResult = true) {}
+
   async acquire(): Promise<boolean> {
-    return true;
+    return this.acquireResult;
   }
 
   async release(): Promise<void> {
@@ -407,6 +426,8 @@ describe('RequestsService reject and cancel lifecycle', () => {
     requests?: InMemoryRequests;
     hcmClient?: FakeHcmClient;
     balances?: InMemoryBalances;
+    operations?: FakeHcmOperations;
+    leases?: FakeLeases;
   }): RequestsService {
     return new RequestsService({
       employees: new InMemoryEmployees([employee, manager]),
@@ -432,8 +453,8 @@ describe('RequestsService reject and cancel lifecycle', () => {
       balanceTtlMs: 5 * 60 * 1000,
       balanceDimensionLeaseTtlMs: 30_000,
       idempotency: new FakeRequestIdempotency(),
-      operations: new FakeHcmOperations(),
-      leases: new FakeLeases(),
+      operations: overrides?.operations ?? new FakeHcmOperations(),
+      leases: overrides?.leases ?? new FakeLeases(),
     });
   }
 
@@ -533,6 +554,209 @@ describe('RequestsService reject and cancel lifecycle', () => {
     expect((await requests.findById(approvedRequest.id))?.status).toBe(
       'CANCELLATION_UNKNOWN',
     );
+  });
+
+  it('reverts approved cancellation when HCM restore fails definitively', async () => {
+    const requests = new InMemoryRequests([{ ...approvedRequest }]);
+    const hcmClient = new FakeHcmClient(async () => {
+      throw new AppError(
+        'HCM_UNAVAILABLE',
+        503,
+        'Cannot reach authoritative HCM.',
+      );
+    });
+    const service = buildService({ requests, hcmClient });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'HCM_UNAVAILABLE',
+      statusCode: 503,
+    });
+    expect((await requests.findById(approvedRequest.id))?.status).toBe(
+      'APPROVED',
+    );
+  });
+
+  it('rejects cancellation while approval is in progress', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...approvedRequest,
+        status: 'APPROVAL_IN_PROGRESS',
+      },
+    ]);
+    const service = buildService({ requests });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_IN_PROGRESS',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects cancellation when request state is unknown', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...approvedRequest,
+        status: 'APPROVAL_UNKNOWN',
+      },
+    ]);
+    const service = buildService({ requests });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_STATE_UNKNOWN',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects cancellation replay while durable restore operation is pending', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...approvedRequest,
+        status: 'CANCELLATION_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: approvedRequest.id,
+        operationType: 'RESTORE',
+        idempotencyKey: 'time-off:request-approved:restore:v1',
+        status: 'PENDING',
+        transactionId: null,
+        responseBody: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    ]);
+    const service = buildService({ requests, operations });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_IN_PROGRESS',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects cancellation replay when durable restore operation is unknown', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...approvedRequest,
+        status: 'CANCELLATION_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: approvedRequest.id,
+        operationType: 'RESTORE',
+        idempotencyKey: 'time-off:request-approved:restore:v1',
+        status: 'UNKNOWN',
+        transactionId: null,
+        responseBody: null,
+        errorCode: 'HCM_RESULT_UNKNOWN',
+        errorMessage: 'timeout',
+      },
+    ]);
+    const service = buildService({ requests, operations });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        approvedRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_STATE_UNKNOWN',
+      statusCode: 409,
+    });
+  });
+
+  it('retries cancellation when durable restore operation previously failed', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...approvedRequest,
+        status: 'CANCELLATION_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: approvedRequest.id,
+        operationType: 'RESTORE',
+        idempotencyKey: 'time-off:request-approved:restore:v1',
+        status: 'FAILED',
+        transactionId: null,
+        responseBody: null,
+        errorCode: 'HCM_UNAVAILABLE',
+        errorMessage: 'down',
+      },
+    ]);
+    const hcmClient = new FakeHcmClient(async () => ({
+      transactionId: 'hcm-tx-restore-001',
+      balance: {
+        ...balance,
+        availableDays: 10,
+        version: 3,
+      },
+    }));
+    const service = buildService({ requests, operations, hcmClient });
+
+    const cancelled = await service.cancelRequest(
+      { userId: employee.id, role: employee.role },
+      approvedRequest.id,
+      {},
+    );
+
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(hcmClient.restored).toHaveLength(1);
+  });
+
+  it('rejects cancellation when the dimension lease is held', async () => {
+    const service = buildService({ leases: new FakeLeases(false) });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'BALANCE_DIMENSION_LOCKED',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects cancellation for a missing request', async () => {
+    const service = buildService({ requests: new InMemoryRequests([]) });
+
+    await expect(
+      service.cancelRequest(
+        { userId: employee.id, role: employee.role },
+        'missing',
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_NOT_FOUND',
+      statusCode: 404,
+    });
   });
 
   it('forbids employees from cancelling other employees requests', async () => {

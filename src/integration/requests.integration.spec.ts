@@ -308,6 +308,160 @@ describe('RequestsService integration', () => {
     expect(hcmClientMock.consumeBalance).not.toHaveBeenCalled();
   });
 
+  it('reuses a SUCCESS restore operation without calling HCM again', async () => {
+    const created = await prisma.timeOffRequest.create({
+      data: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: 'VACATION',
+        startDate: new Date('2026-05-01T00:00:00.000Z'),
+        endDate: new Date('2026-05-03T00:00:00.000Z'),
+        durationDays: 3,
+        status: 'CANCELLATION_IN_PROGRESS',
+        resolvedBy: 'mgr-001',
+        resolvedAt: new Date('2026-04-24T00:01:00.000Z'),
+        hcmTransactionId: 'hcm-tx-001',
+      },
+    });
+
+    await prisma.hcmOperation.create({
+      data: {
+        requestId: created.id,
+        operationType: 'RESTORE',
+        idempotencyKey: `time-off:${created.id}:restore:v1`,
+        status: 'SUCCESS',
+        transactionId: 'hcm-tx-restore-001',
+        responseBody: JSON.stringify({
+          transactionId: 'hcm-tx-restore-001',
+          balance: {
+            employeeId: 'emp-001',
+            locationId: 'loc-nyc',
+            leaveType: 'VACATION',
+            availableDays: 10,
+            sourceUpdatedAt: '2026-04-24T00:02:00.000Z',
+          },
+        }),
+      },
+    });
+
+    const cancelled = await requestsService.cancelRequest(
+      { userId: 'emp-001', role: Role.EMPLOYEE },
+      created.id,
+      { reason: 'Plans changed' },
+    );
+
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(hcmClientMock.restoreBalance).not.toHaveBeenCalled();
+  });
+
+  it('serializes simultaneous approvals for the same balance dimension', async () => {
+    hcmClientMock.getBalance.mockResolvedValue({
+      employeeId: 'emp-001',
+      locationId: 'loc-nyc',
+      leaveType: LeaveType.VACATION,
+      availableDays: 10,
+      lastSyncedAt: new Date('2026-04-24T00:01:00.000Z'),
+      sourceUpdatedAt: new Date('2026-04-24T00:01:00.000Z'),
+      version: 2,
+      createdAt: new Date('2026-04-24T00:01:00.000Z'),
+      updatedAt: new Date('2026-04-24T00:01:00.000Z'),
+    });
+
+    const first = await requestsService.createRequest(
+      { userId: 'emp-001', role: Role.EMPLOYEE },
+      {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        startDate: '2026-05-01',
+        endDate: '2026-05-03',
+      },
+    );
+    const second = await requestsService.createRequest(
+      { userId: 'emp-001', role: Role.EMPLOYEE },
+      {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        startDate: '2026-05-10',
+        endDate: '2026-05-12',
+      },
+    );
+
+    let releaseConsume!: (value: {
+      transactionId: string;
+      balance: {
+        employeeId: string;
+        locationId: string;
+        leaveType: LeaveType;
+        availableDays: number;
+        lastSyncedAt: Date;
+        sourceUpdatedAt: Date;
+        version: number;
+        createdAt: Date;
+        updatedAt: Date;
+      };
+    }) => void;
+    const consumeStarted = new Promise<void>((resolve) => {
+      hcmClientMock.consumeBalance.mockImplementationOnce(
+        () =>
+          new Promise((innerResolve) => {
+            releaseConsume = innerResolve;
+            resolve();
+          }),
+      );
+    });
+
+    const firstApproval = requestsService.approveRequest(
+      { userId: 'mgr-001', role: Role.MANAGER },
+      first.id,
+      {},
+    );
+    await consumeStarted;
+
+    await expect(
+      requestsService.approveRequest(
+        { userId: 'mgr-001', role: Role.MANAGER },
+        second.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'BALANCE_DIMENSION_LOCKED',
+      statusCode: 409,
+    });
+
+    releaseConsume({
+      transactionId: 'hcm-tx-001',
+      balance: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        availableDays: 7,
+        lastSyncedAt: new Date('2026-04-24T00:02:00.000Z'),
+        sourceUpdatedAt: new Date('2026-04-24T00:02:00.000Z'),
+        version: 3,
+        createdAt: new Date('2026-04-24T00:02:00.000Z'),
+        updatedAt: new Date('2026-04-24T00:02:00.000Z'),
+      },
+    });
+
+    await expect(firstApproval).resolves.toMatchObject({
+      status: 'APPROVED',
+    });
+    expect(hcmClientMock.consumeBalance).toHaveBeenCalledTimes(1);
+
+    const storedBalance = await prisma.balance.findUniqueOrThrow({
+      where: {
+        employeeId_locationId_leaveType: {
+          employeeId: 'emp-001',
+          locationId: 'loc-nyc',
+          leaveType: 'VACATION',
+        },
+      },
+    });
+    expect(storedBalance.availableDays).toBe(7);
+  });
+
   it('rejects approval when the balance dimension lease is already held', async () => {
     hcmClientMock.getBalance.mockResolvedValue({
       employeeId: 'emp-001',

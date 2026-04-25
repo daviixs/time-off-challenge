@@ -8,11 +8,11 @@
 
 The current implementation is **partially correct**, but it does **not** yet satisfy the hard guarantees required for a production-grade time-off workflow:
 
-| Goal | Verdict | Why |
-| --- | --- | --- |
-| No invalid approvals | ❌ Not guaranteed | Two competing approvals can still over-consume when the HCM behaves non-defensively. |
-| No balance corruption | ❌ Not guaranteed | Unknown-result writes and stale realtime syncs can diverge local state from HCM. |
-| No double processing | ❌ Not guaranteed | Request creation has no idempotency, and approval can issue duplicate outbound consumes. |
+| Goal                                         | Verdict           | Why                                                                                                        |
+| -------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| No invalid approvals                         | ❌ Not guaranteed | Two competing approvals can still over-consume when the HCM behaves non-defensively.                       |
+| No balance corruption                        | ❌ Not guaranteed | Unknown-result writes and stale realtime syncs can diverge local state from HCM.                           |
+| No double processing                         | ❌ Not guaranteed | Request creation has no idempotency, and approval can issue duplicate outbound consumes.                   |
 | No inconsistency between HCM and local state | ❌ Not guaranteed | Approval/cancel races and ambiguous write timeouts can leave HCM changed while local state says otherwise. |
 
 The current system **does** correctly handle the happy path and several explicit fail-closed paths, but there are still critical distributed-systems failures that can happen under concurrency, ambiguity, or stale data.
@@ -227,11 +227,19 @@ function assertValidHcmBalance(
     payload.locationId !== expected.locationId ||
     payload.leaveType !== expected.leaveType
   ) {
-    throw new AppError('HCM_WRITE_FAILED', 502, 'HCM returned mismatched dimensions.');
+    throw new AppError(
+      'HCM_WRITE_FAILED',
+      502,
+      'HCM returned mismatched dimensions.',
+    );
   }
 
   if (payload.availableDays < 0) {
-    throw new AppError('HCM_WRITE_FAILED', 502, 'HCM returned a negative balance.');
+    throw new AppError(
+      'HCM_WRITE_FAILED',
+      502,
+      'HCM returned a negative balance.',
+    );
   }
 }
 ```
@@ -254,14 +262,8 @@ function assertValidHcmBalance(
 
 ```json
 {
-  "statuses": [
-    "APPROVED",
-    "REQUEST_NOT_PENDING"
-  ],
-  "consumeCalls": [
-    "time-off:req-1:consume:v1",
-    "time-off:req-1:consume:v1"
-  ],
+  "statuses": ["APPROVED", "REQUEST_NOT_PENDING"],
+  "consumeCalls": ["time-off:req-1:consume:v1", "time-off:req-1:consume:v1"],
   "finalRequestStatus": "APPROVED"
 }
 ```
@@ -287,15 +289,9 @@ function assertValidHcmBalance(
 
 ```json
 {
-  "statuses": [
-    "fulfilled",
-    "fulfilled"
-  ],
+  "statuses": ["fulfilled", "fulfilled"],
   "createdCount": 2,
-  "requestStatuses": [
-    "PENDING",
-    "PENDING"
-  ]
+  "requestStatuses": ["PENDING", "PENDING"]
 }
 ```
 
@@ -343,15 +339,9 @@ model RequestIdempotency {
 
 ```json
 {
-  "statuses": [
-    "fulfilled",
-    "fulfilled"
-  ],
+  "statuses": ["fulfilled", "fulfilled"],
   "createdCount": 2,
-  "requestStatuses": [
-    "PENDING",
-    "PENDING"
-  ]
+  "requestStatuses": ["PENDING", "PENDING"]
 }
 ```
 
@@ -369,14 +359,8 @@ model RequestIdempotency {
 
 ```json
 {
-  "statuses": [
-    "fulfilled",
-    "fulfilled"
-  ],
-  "requestStates": [
-    "APPROVED",
-    "APPROVED"
-  ],
+  "statuses": ["fulfilled", "fulfilled"],
+  "requestStates": ["APPROVED", "APPROVED"],
   "authoritativeBalance": -4,
   "hcmCalls": [
     {

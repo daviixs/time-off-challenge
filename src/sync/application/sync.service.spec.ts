@@ -226,6 +226,43 @@ describe('SyncService', () => {
     });
   });
 
+  it('upserts multiple newer batch records and tracks processed counts', async () => {
+    const balances = new InMemoryBalances([{ ...existingBalance }]);
+    const syncLogs = new InMemorySyncLogs();
+    const service = buildService({ balances, syncLogs });
+
+    const result = await service.syncBatch({
+      triggeredBy: 'hcm-batch',
+      balances: [
+        {
+          employeeId: 'emp-001',
+          locationId: 'loc-nyc',
+          leaveType: LeaveType.VACATION,
+          availableDays: 12,
+          sourceUpdatedAt: new Date('2026-04-24T00:08:00.000Z'),
+        },
+        {
+          employeeId: 'emp-002',
+          locationId: 'loc-sfo',
+          leaveType: LeaveType.SICK,
+          availableDays: 6,
+          sourceUpdatedAt: new Date('2026-04-24T00:08:00.000Z'),
+        },
+      ],
+    });
+
+    expect(result).toEqual({ processed: 2, failed: 0, skipped: 0 });
+    expect(balances.upserts.map((item) => item.employeeId)).toEqual([
+      'emp-001',
+      'emp-002',
+    ]);
+    expect(syncLogs.entries.at(-1)).toMatchObject({
+      syncType: 'BATCH',
+      recordsProcessed: 2,
+      skipped: 0,
+    });
+  });
+
   it('upserts newer batch records and records processed counts', async () => {
     const balances = new InMemoryBalances([{ ...existingBalance }]);
     const syncLogs = new InMemorySyncLogs();
@@ -255,7 +292,8 @@ describe('SyncService', () => {
   });
 
   it('rejects invalid incoming balances with negative available days', async () => {
-    const service = buildService();
+    const balances = new InMemoryBalances([{ ...existingBalance }]);
+    const service = buildService({ balances });
 
     await expect(
       service.syncRealtime({
@@ -272,5 +310,31 @@ describe('SyncService', () => {
       code: 'INVALID_HCM_PAYLOAD',
       statusCode: 502,
     });
+    expect(balances.upserts).toHaveLength(0);
+    expect(
+      await balances.findByDimension('emp-001', 'loc-nyc', LeaveType.VACATION),
+    ).toMatchObject({ availableDays: 8 });
+  });
+
+  it('clears atRisk when the new balance still covers pending duration', async () => {
+    const requests = new InMemoryRequests([
+      { ...pendingRequest, atRisk: true },
+    ]);
+    const service = buildService({ requests });
+
+    await service.syncRealtime({
+      triggeredBy: 'hcm-realtime',
+      balance: {
+        employeeId: 'emp-001',
+        locationId: 'loc-nyc',
+        leaveType: LeaveType.VACATION,
+        availableDays: 6,
+        sourceUpdatedAt: new Date('2026-04-24T00:05:30.000Z'),
+      },
+    });
+
+    expect(requests.atRiskUpdates).toEqual([
+      { requestId: 'request-1', atRisk: false },
+    ]);
   });
 });

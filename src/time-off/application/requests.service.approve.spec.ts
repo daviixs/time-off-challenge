@@ -183,6 +183,23 @@ class FakeHcmOperations {
     }
   >();
 
+  constructor(
+    initialRecords: Array<{
+      requestId: string;
+      operationType: 'CONSUME' | 'RESTORE';
+      idempotencyKey: string;
+      status: 'PENDING' | 'SUCCESS' | 'UNKNOWN' | 'FAILED';
+      transactionId: string | null;
+      responseBody: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }> = [],
+  ) {
+    for (const record of initialRecords) {
+      this.records.set(record.idempotencyKey, record);
+    }
+  }
+
   async findByKey(idempotencyKey: string) {
     return this.records.get(idempotencyKey) ?? null;
   }
@@ -266,8 +283,10 @@ class FakeHcmOperations {
 }
 
 class FakeLeases {
+  constructor(private readonly acquireResult = true) {}
+
   async acquire(): Promise<boolean> {
-    return true;
+    return this.acquireResult;
   }
 
   async release(): Promise<void> {
@@ -375,6 +394,8 @@ describe('RequestsService.approveRequest', () => {
     requests?: InMemoryRequests;
     balances?: InMemoryBalances;
     hcmClient?: FakeHcmClient;
+    operations?: FakeHcmOperations;
+    leases?: FakeLeases;
   }): RequestsService {
     return new RequestsService({
       employees: new InMemoryEmployees([employee, manager]),
@@ -411,8 +432,8 @@ describe('RequestsService.approveRequest', () => {
       balanceTtlMs: 5 * 60 * 1000,
       balanceDimensionLeaseTtlMs: 30_000,
       idempotency: new FakeRequestIdempotency(),
-      operations: new FakeHcmOperations(),
-      leases: new FakeLeases(),
+      operations: overrides?.operations ?? new FakeHcmOperations(),
+      leases: overrides?.leases ?? new FakeLeases(),
     });
   }
 
@@ -520,6 +541,229 @@ describe('RequestsService.approveRequest', () => {
     );
   });
 
+  it('leaves the request pending when HCM consume fails definitively', async () => {
+    const requests = new InMemoryRequests([{ ...pendingRequest }]);
+    const hcmClient = new FakeHcmClient({
+      getBalance: async () => ({ ...balance }),
+      consume: async () => {
+        throw new AppError(
+          'HCM_UNAVAILABLE',
+          503,
+          'Cannot reach authoritative HCM.',
+        );
+      },
+    });
+    const service = buildService({ requests, hcmClient });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'HCM_UNAVAILABLE',
+      statusCode: 503,
+    });
+    expect((await requests.findById(pendingRequest.id))?.status).toBe(
+      'PENDING',
+    );
+  });
+
+  it('moves approval to APPROVAL_UNKNOWN when HCM consume result is ambiguous', async () => {
+    const requests = new InMemoryRequests([{ ...pendingRequest }]);
+    const hcmClient = new FakeHcmClient({
+      getBalance: async () => ({ ...balance }),
+      consume: async () => {
+        throw new AppError(
+          'HCM_RESULT_UNKNOWN',
+          503,
+          'HCM timed out before confirming the operation result.',
+        );
+      },
+    });
+    const service = buildService({ requests, hcmClient });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'HCM_RESULT_UNKNOWN',
+      statusCode: 503,
+    });
+    expect((await requests.findById(pendingRequest.id))?.status).toBe(
+      'APPROVAL_UNKNOWN',
+    );
+  });
+
+  it('rejects approval when request is already in APPROVAL_UNKNOWN', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...pendingRequest,
+        status: 'APPROVAL_UNKNOWN',
+      },
+    ]);
+    const service = buildService({ requests });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_STATE_UNKNOWN',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects approval when another transition is already in progress', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...pendingRequest,
+        status: 'CANCELLATION_IN_PROGRESS',
+      },
+    ]);
+    const service = buildService({ requests });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_IN_PROGRESS',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects approval replay while the durable HCM operation is pending', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...pendingRequest,
+        status: 'APPROVAL_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: pendingRequest.id,
+        operationType: 'CONSUME',
+        idempotencyKey: 'time-off:request-1:consume:v1',
+        status: 'PENDING',
+        transactionId: null,
+        responseBody: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    ]);
+    const service = buildService({ requests, operations });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_IN_PROGRESS',
+      statusCode: 409,
+    });
+  });
+
+  it('rejects approval replay when the durable HCM operation is unknown', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...pendingRequest,
+        status: 'APPROVAL_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: pendingRequest.id,
+        operationType: 'CONSUME',
+        idempotencyKey: 'time-off:request-1:consume:v1',
+        status: 'UNKNOWN',
+        transactionId: null,
+        responseBody: null,
+        errorCode: 'HCM_RESULT_UNKNOWN',
+        errorMessage: 'timeout',
+      },
+    ]);
+    const service = buildService({ requests, operations });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_STATE_UNKNOWN',
+      statusCode: 409,
+    });
+  });
+
+  it('retries approval when the durable HCM operation was failed', async () => {
+    const requests = new InMemoryRequests([
+      {
+        ...pendingRequest,
+        status: 'APPROVAL_IN_PROGRESS',
+      },
+    ]);
+    const operations = new FakeHcmOperations([
+      {
+        requestId: pendingRequest.id,
+        operationType: 'CONSUME',
+        idempotencyKey: 'time-off:request-1:consume:v1',
+        status: 'FAILED',
+        transactionId: null,
+        responseBody: null,
+        errorCode: 'HCM_UNAVAILABLE',
+        errorMessage: 'down',
+      },
+    ]);
+    const hcmClient = new FakeHcmClient({
+      getBalance: async () => ({ ...balance }),
+      consume: async () => ({
+        transactionId: 'hcm-tx-001',
+        balance: {
+          ...balance,
+          availableDays: 7,
+          version: 2,
+        },
+      }),
+    });
+    const service = buildService({ requests, operations, hcmClient });
+
+    const approved = await service.approveRequest(
+      { userId: manager.id, role: manager.role },
+      pendingRequest.id,
+      {},
+    );
+
+    expect(approved.status).toBe('APPROVED');
+    expect(hcmClient.consumed).toHaveLength(1);
+  });
+
+  it('rejects approval when the dimension lease is held', async () => {
+    const service = buildService({ leases: new FakeLeases(false) });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'BALANCE_DIMENSION_LOCKED',
+      statusCode: 409,
+    });
+  });
+
   it('forbids non-managers from approving requests', async () => {
     const service = buildService();
 
@@ -553,6 +797,21 @@ describe('RequestsService.approveRequest', () => {
     ).rejects.toMatchObject<AppError>({
       code: 'REQUEST_NOT_PENDING',
       statusCode: 422,
+    });
+  });
+
+  it('rejects missing requests before acquiring a lease', async () => {
+    const service = buildService({ requests: new InMemoryRequests([]) });
+
+    await expect(
+      service.approveRequest(
+        { userId: manager.id, role: manager.role },
+        pendingRequest.id,
+        {},
+      ),
+    ).rejects.toMatchObject<AppError>({
+      code: 'REQUEST_NOT_FOUND',
+      statusCode: 404,
     });
   });
 });

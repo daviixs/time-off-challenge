@@ -90,13 +90,7 @@ app.post('/balances/consume', (req, res) => {
     return failForScenario(res, scenario);
   }
 
-  const {
-    employeeId,
-    locationId,
-    leaveType,
-    days,
-    idempotencyKey,
-  } = req.body;
+  const { employeeId, locationId, leaveType, days, idempotencyKey } = req.body;
 
   if (idempotencyResults.has(idempotencyKey)) {
     return res.status(200).json(idempotencyResults.get(idempotencyKey));
@@ -137,13 +131,7 @@ app.post('/balances/restore', (req, res) => {
     return failForScenario(res, scenario);
   }
 
-  const {
-    employeeId,
-    locationId,
-    leaveType,
-    days,
-    idempotencyKey,
-  } = req.body;
+  const { employeeId, locationId, leaveType, days, idempotencyKey } = req.body;
 
   if (idempotencyResults.has(idempotencyKey)) {
     return res.status(200).json(idempotencyResults.get(idempotencyKey));
