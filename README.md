@@ -9,6 +9,8 @@
 ![Status](https://img.shields.io/badge/Take--Home-Backend%20Challenge-0A66C2)
 **Repository:** [github.com/daviixs/time-off-service](https://github.com/daviixs/...)
 
+**Repository:** [github.com/daviixs/time-off-service](https://github.com/daviixs/...)
+
 > Backend microservice for managing time-off requests with **HCM as the source of truth for balances** and **local state responsible for the request workflow**.
 > The solution prioritizes balance integrity, defensive synchronization, auditing, idempotency, and quality evidence through tests.
 
@@ -1101,6 +1103,7 @@ curl -s -X POST http://127.0.0.1:4010/mock/set-scenario \
 
 ## Author
 
-**daviixs**  
-Backend take-home submission  
+**Davi Xavier Silva**
+Backend take-home submission
 Contact: `xaviersilvadavi@gmail.com`
+Linkedin: `https://www.linkedin.com/in/davi-xavier-silva/`
