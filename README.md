@@ -8,156 +8,156 @@
 ![Coverage](https://img.shields.io/badge/Coverage-83.12%25%20branches-2EA043)
 ![Status](https://img.shields.io/badge/Take--Home-Backend%20Challenge-0A66C2)
 
-> Microserviço backend para gerenciamento de solicitações de time-off com **HCM como fonte da verdade para saldo** e **estado local responsável pelo workflow das solicitações**.  
-> A solução prioriza integridade de saldo, sincronização defensiva, auditoria, idempotência e evidência de qualidade por meio de testes.
+> Backend microservice for managing time-off requests with **HCM as the source of truth for balances** and **local state responsible for the request workflow**.
+> The solution prioritizes balance integrity, defensive synchronization, auditing, idempotency, and quality evidence through tests.
 
-## Índice
+## Table of Contents
 
-- [Visão geral](#visão-geral)
-- [Contexto do desafio técnico](#contexto-do-desafio-técnico)
-- [O problema](#o-problema)
-- [Personas envolvidas](#personas-envolvidas)
-- [Arquitetura da solução](#arquitetura-da-solução)
-- [Diagramas](#diagramas)
-- [Tecnologias escolhidas e justificativas](#tecnologias-escolhidas-e-justificativas)
-- [Como executar](#como-executar)
-- [Variáveis de ambiente](#variáveis-de-ambiente)
-- [Endpoints da API](#endpoints-da-api)
-- [Fluxos principais](#fluxos-principais)
-- [Estratégia de sincronização com HCM](#estratégia-de-sincronização-com-hcm)
-- [Estratégia de integridade de saldo](#estratégia-de-integridade-de-saldo)
+- [Overview](#overview)
+- [Technical Challenge Context](#technical-challenge-context)
+- [The Problem](#the-problem)
+- [Involved Personas](#involved-personas)
+- [Solution Architecture](#solution-architecture)
+- [Diagrams](#diagrams)
+- [Chosen Technologies and Justifications](#chosen-technologies-and-justifications)
+- [How to Run](#how-to-run)
+- [Environment Variables](#environment-variables)
+- [API Endpoints](#api-endpoints)
+- [Core Flows](#core-flows)
+- [HCM Synchronization Strategy](#hcm-synchronization-strategy)
+- [Balance Integrity Strategy](#balance-integrity-strategy)
 - [Correctness Hardening](#correctness-hardening)
-- [Decisões técnicas](#decisões-técnicas)
-- [Alternativas consideradas](#alternativas-consideradas)
-- [Estrutura do projeto](#estrutura-do-projeto)
-- [Testes](#testes)
+- [Technical Decisions](#technical-decisions)
+- [Considered Alternatives](#considered-alternatives)
+- [Project Structure](#project-structure)
+- [Tests](#tests)
 - [Mock HCM](#mock-hcm)
-- [Cenários críticos cobertos](#cenários-críticos-cobertos)
-- [Limitações conhecidas](#limitações-conhecidas)
-- [Próximos passos](#próximos-passos)
-- [Autor](#autor)
+- [Covered Critical Scenarios](#covered-critical-scenarios)
+- [Known Limitations](#known-limitations)
+- [Next Steps](#next-steps)
+- [Author](#author)
 
-## Visão geral
+## Overview
 
-O **Time-Off Microservice** foi projetado para resolver um problema clássico de integração: permitir que empregados e gestores operem solicitações de afastamento com baixa latência e bom feedback de produto, sem violar o fato de que o **HCM continua sendo a autoridade final de saldo**.
+The **Time-Off Microservice** was designed to solve a classic integration problem: allowing employees and managers to operate time-off requests with low latency and good product feedback, without violating the fact that the **HCM remains the final authority on balances**.
 
-Na prática, isso significa separar claramente duas responsabilidades:
+In practice, this means clearly separating two responsibilities:
 
 - **HCM**
-  - fonte da verdade para saldo
-  - sistema externo que pode ser alterado por ReadyOn e por outros processos independentes
+  - source of truth for balances
+  - external system that can be altered by ReadyOn and by other independent processes
 - **Time-Off Microservice**
-  - autoridade local para o ciclo de vida da solicitação
-  - cache/projeção local de saldo para leitura rápida
-  - camada defensiva de validação, auditoria e sincronização
+  - local authority for the request lifecycle
+  - local balance cache/projection for fast reading
+  - defensive layer of validation, auditing, and synchronization
 
-O resultado é um serviço que:
+The result is a service that:
 
-- cria solicitações com validação local + refresh defensivo quando necessário
-- revalida o saldo no HCM antes da aprovação
-- restaura saldo no HCM ao cancelar uma solicitação aprovada
-- processa sincronização **batch** e **realtime**
-- trata inconsistência, timeout e erro do HCM como eventos de primeira classe
+- creates requests with local validation + defensive refresh when necessary
+- revalidates the balance in the HCM before approval
+- restores the balance in the HCM when canceling an approved request
+- processes **batch** and **realtime** synchronization
+- treats inconsistency, timeout, and HCM errors as first-class events
 
-## Contexto do desafio técnico
+## Technical Challenge Context
 
-O desafio parte do cenário em que um módulo de time-off é a interface principal para colaboradores, enquanto um HCM externo, como Workday ou SAP, continua sendo o sistema mestre para dados de emprego e saldo.
+The challenge starts from the scenario where a time-off module is the primary interface for employees, while an external HCM, such as Workday or SAP, remains the master system for employment and balance data.
 
-Os requisitos centrais do desafio são:
+The core requirements of the challenge are:
 
-- construir um backend com NestJS, TypeScript e SQLite
-- manter a integridade do saldo mesmo com alterações externas no HCM
-- tratar HCM como autoridade final
-- suportar sincronização **realtime** e **batch**
-- adotar uma abordagem defensiva contra erros incompletos ou inconsistentes do HCM
-- usar testes como principal evidência de qualidade
+- build a backend with NestJS, TypeScript, and SQLite
+- maintain balance integrity even with external changes in the HCM
+- treat HCM as the final authority
+- support **realtime** and **batch** synchronization
+- adopt a defensive approach against incomplete or inconsistent HCM errors
+- use tests as the primary evidence of quality
 
-Este repositório responde a esses requisitos com:
+This repository answers these requirements with:
 
-- API REST para solicitação, aprovação, rejeição, cancelamento e consulta de saldo
-- cache/projeção local em SQLite
-- cliente HCM com logging e normalização de erros
-- mock HCM com cenários de seed, erro, delay lógico e mudanças externas de saldo
-- suíte de testes unitários, integração e e2e
+- REST API for request, approval, rejection, cancellation, and balance inquiry
+- local cache/projection in SQLite
+- HCM client with logging and error normalization
+- mock HCM with scenarios for seed, error, logical delay, and external balance changes
+- suite of unit, integration, and e2e tests
 
-## O problema
+## The Problem
 
-Sincronizar saldos entre dois sistemas é difícil porque o serviço local **não é o único escritor** no HCM.
+Synchronizing balances between two systems is difficult because the local service **is not the sole writer** in the HCM.
 
-Os principais riscos deste domínio são:
+The main risks of this domain are:
 
 - **stale reads**
-  - o saldo consultado localmente pode já estar desatualizado no momento da aprovação
+  - the balance queried locally may already be outdated at the time of approval
 - **dual-writer**
-  - o HCM pode ser alterado por processos externos, como bônus de aniversário ou refresh anual
-- **insuficiência de saldo não reportada corretamente**
-  - o HCM pode não devolver erro consistente em todos os cenários
-- **concorrência**
-  - duas ações simultâneas podem competir pelo mesmo saldo
-- **ambiguidade em falhas**
-  - timeout em escrita do HCM não pode ser tratado como sucesso otimista
+  - the HCM can be altered by external processes, such as anniversary bonuses or annual refreshes
+- **insufficient balance not properly reported**
+  - the HCM might not return a consistent error in all scenarios
+- **concurrency**
+  - two simultaneous actions may compete for the same balance
+- **ambiguity in failures**
+  - a timeout when writing to the HCM cannot be treated as an optimistic success
 
-O desenho da solução assume explicitamente que:
+The solution design explicitly assumes that:
 
-- **SQLite nunca é a fonte final de saldo**
-- **aprovação sem revalidação no HCM é proibida**
-- **falha ou ambiguidade no HCM mantém o estado local conservador**
+- **SQLite is never the final source of balances**
+- **approval without revalidation in the HCM is forbidden**
+- **failure or ambiguity in the HCM keeps the local state conservative**
 
-## Personas envolvidas
+## Involved Personas
 
-| Persona                  | Objetivo                                 | Risco principal                                   | Resposta do sistema                                 |
-| ------------------------ | ---------------------------------------- | ------------------------------------------------- | --------------------------------------------------- |
-| Employee                 | Solicitar time-off e ver saldo confiável | receber saldo desatualizado ou aprovação ilusória | projeção local rápida + refresh do HCM quando stale |
-| Manager                  | Aprovar com segurança                    | aprovar pedido já inválido no HCM                 | revalidação obrigatória antes da aprovação          |
-| HR / HCM                 | Aplicar mudanças externas de saldo       | drift entre HCM e serviço local                   | sincronização batch + realtime                      |
-| Engineering / Operations | Evoluir o sistema com segurança          | regressões e inconsistência silenciosa            | testes, auditoria e mock HCM reproduzível           |
+| Persona                  | Objective                                  | Main Risk                                            | System Response                                     |
+| ------------------------ | ------------------------------------------ | ---------------------------------------------------- | --------------------------------------------------- |
+| Employee                 | Request time-off and see reliable balance  | receiving a stale balance or illusory approval       | fast local projection + refresh from HCM when stale |
+| Manager                  | Approve safely                             | approving a request already invalid in the HCM       | mandatory revalidation before approval              |
+| HR / HCM                 | Apply external balance changes             | drift between HCM and local service                  | batch + realtime synchronization                    |
+| Engineering / Operations | Evolve the system safely                   | regressions and silent inconsistency                 | tests, auditing, and reproducible mock HCM          |
 
-## Arquitetura da solução
+## Solution Architecture
 
-O serviço segue uma arquitetura modular, com separação clara entre:
+The service follows a modular architecture, with a clear separation between:
 
-- **workflow local**
+- **local workflow**
   - requests
-  - autorização por headers mockados
-  - auditoria
-- **projeção local**
-  - balances em SQLite
-  - TTL de freshness
-  - marcação de `atRisk`
-- **integração externa**
-  - leitura e escrita no HCM
-  - normalização de erros
-  - idempotência para operações de consume/restore
+  - authorization via mocked headers
+  - auditing
+- **local projection**
+  - balances in SQLite
+  - freshness TTL
+  - `atRisk` marking
+- **external integration**
+  - reading and writing to the HCM
+  - error normalization
+  - idempotency for consume/restore operations
 
-### Componentes principais
+### Main Components
 
 - `RequestsService`
-  - cria, aprova, rejeita e cancela solicitações
+  - creates, approves, rejects, and cancels requests
 - `BalancesService`
-  - resolve leitura de saldo com política de freshness
+  - resolves balance reading with a freshness policy
 - `SyncService`
-  - processa sincronizações inbound do HCM
+  - processes inbound synchronizations from the HCM
 - `HcmClientService`
-  - encapsula comunicação outbound com o HCM
+  - encapsulates outbound communication with the HCM
 - `SQLite / Prisma`
-  - armazena estado do workflow e projeção local de saldo
+  - stores workflow state and local balance projection
 
-### Modelo de consistência
+### Consistency Model
 
-- **saldo**
-  - autoridade final: HCM
-- **status da solicitação**
-  - autoridade final: microserviço local
-- **aprovação**
-  - só ocorre após confirmação de consumo no HCM
-- **cancelamento aprovado**
-  - só é finalizado após confirmação de restore no HCM
+- **balance**
+  - final authority: HCM
+- **request status**
+  - final authority: local microservice
+- **approval**
+  - only occurs after consumption confirmation in the HCM
+- **approved cancellation**
+  - only finalized after restore confirmation in the HCM
 
-## Diagramas
+## Diagrams
 
-### 1. Diagrama de arquitetura (ASCII)
+### 1. Architecture Diagram (ASCII)
 
-Visão lógica da solução. O diagrama mostra a arquitetura alvo do serviço; na entrega atual, SQLite mantém a aplicação em topologia single-node, mas a separação entre instâncias da API e a camada de estado permanece válida como fronteira de responsabilidade.
+Logical view of the solution. The diagram shows the target architecture of the service; in the current delivery, SQLite keeps the application in a single-node topology, but the separation between API instances and the state layer remains valid as a boundary of responsibility.
 
 ```text
 ┌──────────────────────────── Client Boundary ─────────────────────────────┐
@@ -208,9 +208,9 @@ Visão lógica da solução. O diagrama mostra a arquitetura alvo do serviço; n
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Esse desenho destaca o ponto mais importante do domínio: **a API pode escalar logicamente, mas o saldo final não sai da base local; ele sempre precisa convergir com o HCM**.
+This design highlights the most important point of the domain: **the API can logically scale, but the final balance does not leave the local base; it must always converge with the HCM**.
 
-### 2. Fluxo de criação de request de time-off
+### 2. Time-Off Request Creation Flow
 
 ```mermaid
 sequenceDiagram
@@ -234,9 +234,9 @@ sequenceDiagram
     API-->>Employee: 201 Created
 ```
 
-Esse fluxo existe para equilibrar **UX rápida** com **segurança de dados**. A criação usa a projeção local quando ela ainda é confiável, mas não hesita em consultar o HCM quando a projeção está stale ou ausente.
+This flow exists to balance **fast UX** with **data safety**. The creation uses the local projection when it is still reliable, but does not hesitate to query the HCM when the projection is stale or missing.
 
-### 3. Fluxo de aprovação (crítico)
+### 3. Approval Flow (Critical)
 
 ```mermaid
 sequenceDiagram
@@ -267,9 +267,9 @@ sequenceDiagram
     end
 ```
 
-Esse é o centro da integridade do sistema. A aprovação **nunca** depende apenas do cache local. O HCM é consultado no momento crítico, e a transição local só acontece depois da confirmação externa.
+This is the center of the system's integrity. Approval **never** depends solely on the local cache. The HCM is queried at the critical moment, and the local transition only happens after external confirmation.
 
-### 4. Fluxo de sincronização (batch + realtime)
+### 4. Synchronization Flow (Batch + Realtime)
 
 ```mermaid
 flowchart TD
@@ -288,9 +288,9 @@ flowchart TD
     PENDING --> ATRISK
 ```
 
-Esse fluxo cobre o fato de que o HCM pode mudar fora do microserviço. O papel do sync não é “validar pedidos”; é **reconstruir a projeção local** e sinalizar risco operacional nos pedidos pendentes.
+This flow covers the fact that the HCM can change outside the microservice. The role of sync is not to "validate requests"; it is to **rebuild the local projection** and signal operational risk on pending requests.
 
-### 5. Fluxo de concorrência / race condition
+### 5. Concurrency / Race Condition Flow
 
 ```mermaid
 sequenceDiagram
@@ -317,13 +317,13 @@ sequenceDiagram
     end
 ```
 
-O sistema não assume que concorrência será resolvida apenas localmente. A garantia real vem da combinação de:
+The system does not assume that concurrency will be resolved only locally. The real guarantee comes from the combination of:
 
-- revalidação no HCM
-- escrita idempotente
-- transição local conservadora em caso de erro
+- revalidation in the HCM
+- idempotent writing
+- conservative local transition in case of error
 
-### 6. Fluxo anti-inconsistência
+### 6. Anti-Inconsistency Flow
 
 ```mermaid
 flowchart TD
@@ -337,69 +337,78 @@ flowchart TD
     AUDIT --> END[No optimistic local success]
 ```
 
-Esse fluxo mostra a regra defensiva principal da solução: **se o HCM não confirmou, o sistema local não inventa sucesso**.
+This flow shows the main defensive rule of the solution: **if the HCM did not confirm, the local system does not invent success**.
 
-## Tecnologias escolhidas e justificativas
+## Chosen Technologies and Justifications
 
-| Tecnologia                       | Papel na solução                    | Justificativa                                                           |
+| Technology                       | Role in the Solution                | Justification                                                           |
 | -------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
-| NestJS                           | framework HTTP e composição modular | boa separação por módulos, controllers e providers                      |
-| TypeScript                       | tipagem estática                    | reduz ambiguidade em domínio e contratos                                |
-| Prisma                           | acesso a dados                      | produtividade, schema claro e integração forte com SQLite               |
-| SQLite                           | estado local + projeção de saldo    | atende ao escopo do take-home com setup simples                         |
-| `@prisma/adapter-better-sqlite3` | runtime adapter Prisma 7            | caminho suportado para SQLite com Prisma 7                              |
-| Jest                             | suíte de testes                     | padrão sólido para unit, integration e e2e                              |
-| Supertest                        | testes HTTP                         | validação real das rotas REST                                           |
-| Mock HCM próprio                 | simulação do sistema externo        | permite controlar seed, cenários de erro, inconsistência e introspecção |
+| NestJS                           | HTTP framework and modular composition | good separation by modules, controllers, and providers                  |
+| TypeScript                       | static typing                       | reduces ambiguity in domain and contracts                               |
+| Prisma                           | data access                         | productivity, clear schema, and strong integration with SQLite          |
+| SQLite                           | local state + balance projection    | meets the scope of the take-home with a simple setup                    |
+| `@prisma/adapter-better-sqlite3` | Prisma 7 runtime adapter            | supported path for SQLite with Prisma 7                                 |
+| Jest                             | test suite                          | solid standard for unit, integration, and e2e                           |
+| Supertest                        | HTTP testing                        | real validation of REST routes                                          |
+| Custom Mock HCM                  | external system simulation          | allows controlling seed, error scenarios, inconsistency, and introspection |
 
-## Como executar
+## How to Run
 
-### Execução local
+### Local Execution
 
-1. Instalar dependências:
+1. Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Gerar cliente Prisma e sincronizar schema:
+2. Generate Prisma client and sync schema:
 
 ```bash
 npm run prisma:generate
 npm run db:push
 ```
 
-3. Semear usuários locais:
+3. Seed local users:
 
 ```bash
 npm run db:seed
 ```
 
-4. Subir o mock HCM em um terminal:
+4. Start the mock HCM in one terminal:
 
 ```bash
 npm run mock:hcm
 ```
 
-5. Subir a API em outro terminal:
+5. Start the API in another terminal:
 
 ```bash
 npm run start:dev
 ```
 
-### Observação sobre containerização
+### Note on Containerization
 
-Esta entrega **não inclui Docker nem Docker Compose**, porque a containerização não faz parte do escopo implementado neste repositório. O caminho oficialmente suportado nesta submissão é execução local.
+This delivery **does not include Docker or Docker Compose**, because containerization is not part of the implemented scope in this repository. The officially supported path in this submission is local execution.
 
-### Demo rápida
+### Quick Demo
 
-Reset do mock HCM:
+Note: UUIDs, transaction IDs, and timestamps in the responses below are examples and will vary per run.
+
+**1. Reset the mock HCM:**
 
 ```bash
 curl -s -X POST http://127.0.0.1:4010/mock/reset
 ```
 
-Seed de saldo no HCM:
+*Expected output:*
+```json
+{
+  "reset": true
+}
+```
+
+**2. Seed balance in the HCM:**
 
 ```bash
 curl -s -X POST http://127.0.0.1:4010/mock/seed-balance \
@@ -413,7 +422,14 @@ curl -s -X POST http://127.0.0.1:4010/mock/seed-balance \
   }'
 ```
 
-Sync batch inicial:
+*Expected output:*
+```json
+{
+  "seeded": true
+}
+```
+
+**3. Initial batch sync:**
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/sync/batch \
@@ -431,7 +447,16 @@ curl -s -X POST http://127.0.0.1:3000/sync/batch \
   }'
 ```
 
-Criação de solicitação:
+*Expected output:*
+```json
+{
+  "processed": 1,
+  "failed": 0,
+  "skipped": 0
+}
+```
+
+**4. Create a time-off request:**
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/time-off/requests \
@@ -448,19 +473,95 @@ curl -s -X POST http://127.0.0.1:3000/time-off/requests \
   }'
 ```
 
-## Variáveis de ambiente
+*Expected output:*
+```json
+{
+  "id": "req_12345abcde",
+  "employeeId": "emp-001",
+  "locationId": "loc-nyc",
+  "leaveType": "VACATION",
+  "startDate": "2026-05-01",
+  "endDate": "2026-05-03",
+  "durationDays": 3,
+  "status": "PENDING",
+  "atRisk": false,
+  "notes": "Trip",
+  "resolvedAt": null,
+  "resolvedBy": null,
+  "resolutionNotes": null,
+  "createdAt": "2026-04-25T00:00:00.000Z",
+  "updatedAt": "2026-04-25T00:00:00.000Z"
+}
+```
 
-| Variável                         | Obrigatória | Papel                               |
-| -------------------------------- | ----------- | ----------------------------------- |
-| `DATABASE_URL`                   | sim         | caminho do SQLite local             |
-| `HCM_BASE_URL`                   | sim         | URL base do HCM mock ou HCM real    |
-| `HCM_PORT`                       | não         | porta do runner manual do mock HCM  |
-| `BALANCE_TTL_MS`                 | sim         | TTL da projeção local de saldo      |
-| `BALANCE_DIMENSION_LEASE_TTL_MS` | não         | TTL do lease por dimensão de saldo  |
-| `HCM_TIMEOUT_MS`                 | sim         | timeout de chamadas outbound ao HCM |
-| `PORT`                           | sim         | porta da API NestJS                 |
+**5. Manager approves the request:**
 
-Exemplo:
+*(Replace `req_12345abcde` with the actual ID returned from step 4)*
+
+```bash
+curl -s -X PATCH http://127.0.0.1:3000/time-off/requests/req_12345abcde/approve \
+  -H 'content-type: application/json' \
+  -H 'x-user-id: mgr-001' \
+  -H 'x-role: MANAGER' \
+  -d '{
+    "notes": "Approved have a good trip"
+  }'
+```
+
+*Expected output:*
+```json
+{
+  "id": "req_12345abcde",
+  "employeeId": "emp-001",
+  "locationId": "loc-nyc",
+  "leaveType": "VACATION",
+  "startDate": "2026-05-01",
+  "endDate": "2026-05-03",
+  "durationDays": 3,
+  "status": "APPROVED",
+  "atRisk": false,
+  "notes": "Trip",
+  "resolvedAt": "2026-04-25T00:01:00.000Z",
+  "resolvedBy": "mgr-001",
+  "resolutionNotes": "Approved have a good trip",
+  "createdAt": "2026-04-25T00:00:00.000Z",
+  "updatedAt": "2026-04-25T00:01:00.000Z"
+}
+```
+
+**6. Verify the updated balance:**
+
+```bash
+curl -s "http://127.0.0.1:3000/balances?employeeId=emp-001&locationId=loc-nyc&leaveType=VACATION" \
+  -H 'x-user-id: emp-001' \
+  -H 'x-role: EMPLOYEE'
+```
+
+*Expected output:*
+```json
+{
+  "employeeId": "emp-001",
+  "locationId": "loc-nyc",
+  "leaveType": "VACATION",
+  "availableDays": 7,
+  "sourceUpdatedAt": "2026-04-25T00:01:00.000Z",
+  "lastSyncedAt": "2026-04-25T00:01:00.000Z"
+}
+```
+
+## Environment Variables
+
+| Variable                         | Required | Role                                  |
+| -------------------------------- | -------- | ------------------------------------- |
+| `DATABASE_URL`                   | yes      | path to local SQLite                  |
+| `HCM_BASE_URL`                   | yes      | base URL of the mock HCM or real HCM  |
+| `HCM_PORT`                       | no       | port of the manual mock HCM runner    |
+| `BALANCE_TTL_MS`                 | yes      | local balance projection TTL          |
+| `BALANCE_DIMENSION_LEASE_TTL_MS` | no       | lease TTL per balance dimension       |
+| `HCM_TIMEOUT_MS`                 | yes      | timeout for outbound HCM calls        |
+| `PORT`                           | yes      | port for the NestJS API               |
+
+Example:
 
 ```env
 DATABASE_URL="file:./dev.db"
@@ -472,18 +573,18 @@ HCM_TIMEOUT_MS="2000"
 PORT="3000"
 ```
 
-## Endpoints da API
+## API Endpoints
 
-### Identidade mockada
+### Mocked Identity
 
-As rotas de usuário usam headers confiados:
+User routes use trusted headers:
 
 ```http
 x-user-id: emp-001
 x-role: EMPLOYEE
 ```
 
-ou
+or
 
 ```http
 x-user-id: mgr-001
@@ -492,22 +593,22 @@ x-role: MANAGER
 
 ### Endpoints
 
-| Método  | Path                             | Descrição                 |
+| Method  | Path                             | Description               |
 | ------- | -------------------------------- | ------------------------- |
 | `GET`   | `/health`                        | liveness check            |
-| `POST`  | `/time-off/requests`             | cria solicitação          |
-| `GET`   | `/time-off/requests`             | lista solicitações        |
-| `GET`   | `/time-off/requests/:id`         | busca solicitação         |
-| `PATCH` | `/time-off/requests/:id/approve` | aprova pendência          |
-| `PATCH` | `/time-off/requests/:id/reject`  | rejeita pendência         |
-| `PATCH` | `/time-off/requests/:id/cancel`  | cancela solicitação       |
-| `GET`   | `/balances`                      | consulta projeção atual   |
-| `POST`  | `/sync/realtime`                 | ingestão pontual de saldo |
-| `POST`  | `/sync/batch`                    | ingestão em lote          |
+| `POST`  | `/time-off/requests`             | creates a request         |
+| `GET`   | `/time-off/requests`             | lists requests            |
+| `GET`   | `/time-off/requests/:id`         | fetches a request         |
+| `PATCH` | `/time-off/requests/:id/approve` | approves a pending request|
+| `PATCH` | `/time-off/requests/:id/reject`  | rejects a pending request |
+| `PATCH` | `/time-off/requests/:id/cancel`  | cancels a request         |
+| `GET`   | `/balances`                      | queries current projection|
+| `POST`  | `/sync/realtime`                 | real-time balance ingest  |
+| `POST`  | `/sync/batch`                    | batch balance ingest      |
 
-### Payloads de exemplo
+### Example Payloads
 
-Criação de request:
+Request creation:
 
 ```http
 POST /time-off/requests
@@ -525,7 +626,7 @@ Idempotency-Key: create-request-001
 }
 ```
 
-Aprovação:
+Approval:
 
 ```json
 {
@@ -533,7 +634,7 @@ Aprovação:
 }
 ```
 
-Sync realtime:
+Realtime sync:
 
 ```json
 {
@@ -547,7 +648,7 @@ Sync realtime:
 }
 ```
 
-Erro padronizado:
+Standardized error:
 
 ```json
 {
@@ -557,156 +658,156 @@ Erro padronizado:
 }
 ```
 
-## Fluxos principais
+## Core Flows
 
-### Criação
+### Creation
 
-- valida identidade e ownership
-- aceita `Idempotency-Key` opcional para replay seguro
-- valida datas
-- rejeita overlap
-- usa projeção local quando fresca
-- consulta HCM quando a projeção está stale ou ausente
-- cria a solicitação como `PENDING`
+- validates identity and ownership
+- accepts an optional `Idempotency-Key` for safe replay
+- validates dates
+- rejects overlaps
+- uses local projection when fresh
+- queries HCM when the projection is stale or missing
+- creates the request as `PENDING`
 
-### Aprovação
+### Approval
 
-- exige role `MANAGER`
-- recarrega solicitação
-- move `PENDING` para `APPROVAL_IN_PROGRESS` antes de escrever no HCM
-- revalida no HCM
-- só consome localmente após `consume` confirmado no HCM
-- move para `APPROVAL_UNKNOWN` se o resultado da escrita no HCM for ambíguo
-- atualiza projeção local com retorno do HCM
+- requires `MANAGER` role
+- reloads the request
+- moves `PENDING` to `APPROVAL_IN_PROGRESS` before writing to the HCM
+- revalidates in the HCM
+- only consumes locally after a confirmed `consume` in the HCM
+- moves to `APPROVAL_UNKNOWN` if the write result in the HCM is ambiguous
+- updates local projection with the HCM return
 
-### Cancelamento
+### Cancellation
 
-- `PENDING`: cancelamento local
-- `APPROVED`: move para `CANCELLATION_IN_PROGRESS`, chama `restore` no HCM e só então finaliza como `CANCELLED`
-- resultado ambíguo de restore move a request para `CANCELLATION_UNKNOWN`
+- `PENDING`: local cancellation
+- `APPROVED`: moves to `CANCELLATION_IN_PROGRESS`, calls `restore` in the HCM, and only then finalizes as `CANCELLED`
+- ambiguous restore result moves the request to `CANCELLATION_UNKNOWN`
 
-### Sincronização
+### Synchronization
 
-- `batch`: atualiza corpus local, respeitando `sourceUpdatedAt`
-- `realtime`: atualiza dimensão específica e recalcula `atRisk`
+- `batch`: updates the local corpus, respecting `sourceUpdatedAt`
+- `realtime`: updates a specific dimension and recalculates `atRisk`
 
-## Estratégia de sincronização com HCM
+## HCM Synchronization Strategy
 
-O modelo de sincronização combina dois mecanismos complementares:
+The synchronization model combines two complementary mechanisms:
 
 ### Batch
 
-Usado para reconstrução ampla da projeção local. Ele serve para convergir o estado do microserviço com a fotografia mais recente do HCM.
+Used for broad reconstruction of the local projection. It serves to converge the state of the microservice with the most recent photograph of the HCM.
 
-Características:
+Features:
 
-- ingestão de corpus completo
-- upsert por dimensão
-- descarte de payloads mais antigos que o `sourceUpdatedAt` local
+- full corpus ingestion
+- upsert by dimension
+- discards payloads older than the local `sourceUpdatedAt`
 
 ### Realtime
 
-Usado para mutações pontuais e mais recentes.
+Used for punctual and more recent mutations.
 
-Características:
+Features:
 
-- atualização específica de uma dimensão
-- descarte de evento stale quando `sourceUpdatedAt` recebido é anterior ou igual à projeção local
-- recálculo de pedidos pendentes impactados
-- marcação de `atRisk` sem transição automática de status
+- specific update of one dimension
+- discards stale event when the received `sourceUpdatedAt` is prior to or equal to the local projection
+- recalculation of impacted pending requests
+- marking `atRisk` without automatic status transition
 
-### Por que ambos existem
+### Why both exist
 
-- batch resolve convergência global
-- realtime resolve latência operacional
-- juntos, reduzem drift sem depender apenas de leitura sob demanda
+- batch resolves global convergence
+- realtime resolves operational latency
+- together, they reduce drift without relying solely on on-demand reads
 
-## Estratégia de integridade de saldo
+## Balance Integrity Strategy
 
-Esta é a regra central do sistema:
+This is the central rule of the system:
 
-> A projeção local serve para leitura e triagem, mas o HCM é a autoridade final antes de qualquer aprovação.
+> The local projection serves for reading and triage, but the HCM is the final authority before any approval.
 
-### Mecanismos usados
+### Used Mechanisms
 
-- TTL para projeção local
-- refresh defensivo ao detectar staleness
-- revalidação obrigatória no HCM antes de aprovar
-- escrita idempotente no HCM para `consume` e `restore`
-- estado persistente de operação HCM para replay seguro
-- lease por dimensão `(employeeId, locationId, leaveType)` para serializar operações conflitantes
-- validação semântica de payloads HCM antes de qualquer upsert local
-- falha conservadora em timeout ou erro ambíguo
-- auditoria de operações HCM
+- TTL for local projection
+- defensive refresh upon detecting staleness
+- mandatory revalidation in the HCM before approving
+- idempotent writing in the HCM for `consume` and `restore`
+- persistent state of HCM operation for safe replay
+- lease per dimension `(employeeId, locationId, leaveType)` to serialize conflicting operations
+- semantic validation of HCM payloads before any local upsert
+- conservative failure on timeout or ambiguous error
+- auditing of HCM operations
 
-### O que isso evita
+### What this prevents
 
-- aprovação com saldo velho
-- dupla aprovação por falso sucesso local
-- cancelamento aprovado sem restore externo
-- confiança cega em mensagens de erro do HCM
+- approval with a stale balance
+- double approval due to false local success
+- approved cancellation without an external restore
+- blind trust in HCM error messages
 
 ## Correctness Hardening
 
-Esta camada foi adicionada para transformar os cenários críticos do relatório de auditoria em garantias persistidas no sistema. O objetivo é evitar duplicidade, escrita ambígua, overwrite stale e corrupção de saldo mesmo sob retry, timeout e concorrência.
+This layer was added to transform the critical scenarios of the audit report into guarantees persisted in the system. The objective is to avoid duplication, ambiguous writes, stale overwrites, and balance corruption even under retries, timeouts, and concurrency.
 
-| Risco                     | Mecanismo implementado                              | Garantia                                                                                                        |
-| ------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Submit duplicado          | `RequestIdempotency` + header `Idempotency-Key`     | mesma chave e mesmo payload retorna a resposta original; payload diferente retorna `409 IDEMPOTENCY_KEY_REUSED` |
-| Aprovação duplicada       | `HcmOperation` com idempotency key determinística   | operação `SUCCESS` é reutilizada sem chamar o HCM novamente                                                     |
-| Timeout em escrita HCM    | estados `APPROVAL_UNKNOWN` / `CANCELLATION_UNKNOWN` | o sistema não inventa sucesso local quando o resultado externo é ambíguo                                        |
-| Approve/cancel race       | `BalanceDimensionLease`                             | operações na mesma dimensão de saldo são serializadas ou rejeitadas com `409 BALANCE_DIMENSION_LOCKED`          |
-| Sync realtime stale       | comparação por `sourceUpdatedAt`                    | evento antigo retorna `{ "synced": false, "skipped": true }` sem sobrescrever a projeção                        |
-| Payload HCM inconsistente | validator semântico compartilhado                   | dimensão divergente, saldo negativo ou `sourceUpdatedAt` inválido retornam `502 INVALID_HCM_PAYLOAD`            |
+| Risk                      | Implemented Mechanism                               | Guarantee                                                                                                        |
+| ------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Duplicate submit          | `RequestIdempotency` + `Idempotency-Key` header     | same key and same payload returns the original response; different payload returns `409 IDEMPOTENCY_KEY_REUSED`  |
+| Duplicate approval        | `HcmOperation` with deterministic idempotency key   | `SUCCESS` operation is reused without calling the HCM again                                                      |
+| HCM write timeout         | `APPROVAL_UNKNOWN` / `CANCELLATION_UNKNOWN` states  | the system does not invent local success when the external result is ambiguous                                   |
+| Approve/cancel race       | `BalanceDimensionLease`                             | operations on the same balance dimension are serialized or rejected with `409 BALANCE_DIMENSION_LOCKED`          |
+| Stale realtime sync       | comparison by `sourceUpdatedAt`                     | old event returns `{ "synced": false, "skipped": true }` without overwriting the projection                      |
+| Inconsistent HCM payload  | shared semantic validator                           | divergent dimension, negative balance or invalid `sourceUpdatedAt` returns `502 INVALID_HCM_PAYLOAD`             |
 
-### Estados adicionais
+### Additional States
 
-O workflow agora explicita estados intermediários e de incerteza:
+The workflow now explicitly models intermediate and uncertainty states:
 
-| Fluxo                 | Transições seguras                                             |
+| Flow                  | Safe Transitions                                               |
 | --------------------- | -------------------------------------------------------------- |
-| Aprovação             | `PENDING -> APPROVAL_IN_PROGRESS -> APPROVED`                  |
-| Aprovação ambígua     | `PENDING -> APPROVAL_IN_PROGRESS -> APPROVAL_UNKNOWN`          |
-| Cancelamento aprovado | `APPROVED -> CANCELLATION_IN_PROGRESS -> CANCELLED`            |
-| Cancelamento ambíguo  | `APPROVED -> CANCELLATION_IN_PROGRESS -> CANCELLATION_UNKNOWN` |
+| Approval              | `PENDING -> APPROVAL_IN_PROGRESS -> APPROVED`                  |
+| Ambiguous approval    | `PENDING -> APPROVAL_IN_PROGRESS -> APPROVAL_UNKNOWN`          |
+| Approved cancellation | `APPROVED -> CANCELLATION_IN_PROGRESS -> CANCELLED`            |
+| Ambiguous cancellation| `APPROVED -> CANCELLATION_IN_PROGRESS -> CANCELLATION_UNKNOWN` |
 
-### Tabelas de controle
+### Control Tables
 
-| Tabela                  | Responsabilidade                                           |
+| Table                   | Responsibility                                             |
 | ----------------------- | ---------------------------------------------------------- |
-| `RequestIdempotency`    | replay seguro de criação de request                        |
-| `HcmOperation`          | estado durável de operações outbound `CONSUME` e `RESTORE` |
-| `BalanceDimensionLease` | lease SQLite-safe por dimensão de saldo                    |
-| `HcmOperationLog`       | trilha de auditoria append-only das chamadas HCM           |
+| `RequestIdempotency`    | safe replay of request creation                            |
+| `HcmOperation`          | durable state of outbound `CONSUME` and `RESTORE` operations|
+| `BalanceDimensionLease` | SQLite-safe lease per balance dimension                    |
+| `HcmOperationLog`       | append-only audit trail of HCM calls                       |
 
-O ponto de design importante é que o sistema não segura transação SQLite aberta durante chamada de rede. Ele usa transições condicionais curtas antes/depois do HCM e uma operação durável para conseguir retomar ou bloquear replay conforme o estado persistido.
+The important design point is that the system does not hold an open SQLite transaction during a network call. It uses short conditional transitions before/after the HCM and a durable operation to be able to resume or block replays based on the persisted state.
 
-## Decisões técnicas
+## Technical Decisions
 
-| Decisão                              | Motivo                                                     |
+| Decision                             | Reason                                                     |
 | ------------------------------------ | ---------------------------------------------------------- |
-| REST em vez de GraphQL               | o domínio é centrado em comandos explícitos                |
-| SQLite como estado local             | atende ao take-home com setup simples e baixo atrito       |
-| HCM como fonte de verdade            | alinhamento direto com o problema proposto                 |
-| Revalidação obrigatória na aprovação | evita autorizar com saldo stale                            |
-| Idempotency key em consume/restore   | protege contra retries e ambiguidade                       |
-| Idempotency key na criação           | evita requests duplicados em retry de cliente              |
-| Estados intermediários/unknown       | modela explicitamente resultado externo ambíguo            |
-| Lease por dimensão de saldo          | serializa operações conflitantes em SQLite                 |
-| Sync batch + realtime                | cobre tanto convergência global quanto atualização pontual |
-| Auditoria local                      | rastreabilidade de integrações e falhas                    |
+| REST instead of GraphQL              | the domain is centered on explicit commands                |
+| SQLite as local state                | meets the take-home with simple setup and low friction     |
+| HCM as source of truth               | direct alignment with the proposed problem                 |
+| Mandatory revalidation on approval   | avoids authorizing with a stale balance                    |
+| Idempotency key in consume/restore   | protects against retries and ambiguity                     |
+| Idempotency key on creation          | avoids duplicate requests in client retries                |
+| Intermediate/unknown states          | explicitly models ambiguous external results               |
+| Lease per balance dimension          | serializes conflicting operations in SQLite                |
+| Batch + realtime sync                | covers both global convergence and specific updates        |
+| Local auditing                       | traceability of integrations and failures                  |
 
-## Alternativas consideradas
+## Considered Alternatives
 
-| Alternativa                                | Vantagem                     | Motivo para não escolher                                                              |
+| Alternative                                | Advantage                    | Reason for not choosing                                                               |
 | ------------------------------------------ | ---------------------------- | ------------------------------------------------------------------------------------- |
-| Reservar saldo localmente na criação       | feedback antecipado          | quebra mais facilmente o modelo “HCM é autoridade final”                              |
-| Outbox/eventual consistency para aprovação | maior robustez operacional   | aumenta complexidade e enfraquece a aprovação síncrona segura                         |
-| GraphQL                                    | flexibilidade de leitura     | não melhora os fluxos command-heavy deste desafio                                     |
-| PostgreSQL                                 | melhor concorrência e escala | fora do escopo da stack obrigatória do take-home                                      |
-| Lock pessimista via transação longa        | serialização simples         | manter transação aberta durante rede aumenta risco de bloqueio e deadlock operacional |
+| Reserve balance locally on creation        | early feedback               | more easily breaks the "HCM is the final authority" model                             |
+| Outbox/eventual consistency for approval   | higher operational robustness| increases complexity and weakens safe synchronous approval                            |
+| GraphQL                                    | reading flexibility          | does not improve the command-heavy flows of this challenge                            |
+| PostgreSQL                                 | better concurrency and scale | out of scope of the mandatory take-home stack                                         |
+| Pessimistic lock via long transaction      | simple serialization         | holding a transaction open over the network increases risk of blocking and operational deadlock |
 
-## Estrutura do projeto
+## Project Structure
 
 ```text
 src/
@@ -733,38 +834,38 @@ scripts/
 └── mock-hcm-server.js
 ```
 
-### Leitura rápida por responsabilidade
+### Quick Read by Responsibility
 
 - `src/time-off`
-  - workflow das solicitações
+  - request workflow
 - `src/balances`
-  - leitura e refresh da projeção de saldo
+  - reading and refreshing the balance projection
 - `src/sync`
-  - ingestão inbound do HCM
+  - inbound HCM ingestion
 - `src/hcm`
-  - integração outbound com HCM
+  - outbound integration with HCM
 - `test/support`
-  - mock HCM realista para testes
+  - realistic mock HCM for tests
 
-## Testes
+## Tests
 
-Testes são a principal evidência de qualidade desta entrega.
+Tests are the primary quality evidence of this delivery.
 
-### Unitários
+### Unit Tests
 
-Cobrem:
+Cover:
 
-- cálculo de duração
+- duration calculation
 - overlap
 - freshness TTL
-- criação de solicitação
-- aprovação defensiva
-- rejeição e cancelamento
-- sincronização batch e realtime
-- validação semântica de payload HCM
-- idempotency hash de criação
+- request creation
+- defensive approval
+- rejection and cancellation
+- batch and realtime synchronization
+- semantic validation of HCM payload
+- creation idempotency hash
 
-Arquivos principais:
+Main files:
 
 - [src/shared/domain/time-off-policy.spec.ts](src/shared/domain/time-off-policy.spec.ts)
 - [src/hcm/hcm-client.service.spec.ts](src/hcm/hcm-client.service.spec.ts)
@@ -774,36 +875,36 @@ Arquivos principais:
 - [src/balances/application/balances.service.spec.ts](src/balances/application/balances.service.spec.ts)
 - [src/sync/application/sync.service.spec.ts](src/sync/application/sync.service.spec.ts)
 
-### Integração
+### Integration Tests
 
-Cobrem:
+Cover:
 
-- graph real de providers do Nest
-- repositórios Prisma reais
-- persistência local real
-- HCM client mockado no nível de serviço
+- real graph of Nest providers
+- real Prisma repositories
+- real local persistence
+- HCM client mocked at the service level
 
-Arquivo principal:
+Main file:
 
 - [src/integration/requests.integration.spec.ts](src/integration/requests.integration.spec.ts)
 
-### E2E
+### E2E Tests
 
-Cobrem:
+Cover:
 
-- fluxo HTTP completo
-- integração com mock HCM real via socket local
+- complete HTTP flow
+- integration with real mock HCM via local socket
 - batch sync
-- criação
-- aprovação
-- cancelamento aprovado
-- marcação de `atRisk`
+- creation
+- approval
+- approved cancellation
+- `atRisk` marking
 
-Arquivo principal:
+Main file:
 
 - [test/time-off.e2e-spec.ts](test/time-off.e2e-spec.ts)
 
-### Comandos de verificação
+### Verification Commands
 
 ```bash
 npm run lint
@@ -814,15 +915,15 @@ npm run test:e2e -- --runInBand
 npm run test:cov -- --runInBand
 ```
 
-Atalho:
+Shortcut:
 
 ```bash
 npm run verify
 ```
 
-### Snapshot de coverage
+## Proof of Coverage
 
-Último snapshot local após hardening de testes:
+Local snapshot after test hardening:
 
 | File                                           | Statements | Branches | Functions |    Lines |
 | ---------------------------------------------- | ---------: | -------: | --------: | -------: |
@@ -834,10 +935,10 @@ npm run verify
 | `src/time-off/application/requests.service.ts` |   `86.93%` | `79.59%` |    `100%` | `86.93%` |
 | `src/time-off/infrastructure`                  |     `100%` | `94.73%` |    `100%` |   `100%` |
 
-Branch coverage subiu de aproximadamente `52.7%` para `83.12%`, dentro da meta de `80-85%`, cobrindo principalmente branches de erro, ambiguidade e concorrência.
+Branch coverage increased from approximately `52.7%` to `83.12%`, covering HCM failure paths, `UNKNOWN` states, sync freshness, idempotency, and concurrency branches.
 
 <details>
-<summary>Output real de <code>npm run test:cov -- --runInBand</code></summary>
+<summary>Real output of <code>npm run test:cov -- --runInBand</code></summary>
 
 ```text
 > time-off-challenge@0.0.1 test:cov
@@ -917,46 +1018,38 @@ Ran all test suites.
 
 </details>
 
-### Caminhos críticos adicionados ao coverage
-
-- `HcmClientService`: sucesso, 500/indisponibilidade, timeout, resposta ambígua, payload semântico inválido, saldo negativo, dimensão divergente, erro em consume e erro em restore.
-- `RequestsService`: aprovação com saldo suficiente/insuficiente, erro HCM, timeout, `APPROVAL_UNKNOWN`, request fora de `PENDING`, replay de operação `SUCCESS`, operação em andamento e lease ocupado.
-- `RequestsService` lifecycle: cancelamento local de `PENDING`, restore de `APPROVED`, erro/ambiguidade de restore, `CANCELLATION_UNKNOWN`, estados inválidos e request inexistente.
-- `SyncService`: realtime novo/stale, batch múltiplo, payload antigo ignorado, payload inválido sem overwrite e marcação `atRisk`.
-- Idempotência e concorrência: replay de `Idempotency-Key`, payload diferente com mesma chave, consume/restore sem duplicar chamada e serialização por dimensão.
-
-Detalhes adicionais:
+Additional details:
 
 - [docs/test-evidence.md](docs/test-evidence.md)
 
 ## Mock HCM
 
-O projeto inclui um mock HCM com comportamento realista o suficiente para testes de integração e demonstração local.
+The project includes a mock HCM with sufficiently realistic behavior for integration tests and local demonstration.
 
-### Capacidades
+### Capabilities
 
-- seed de saldo por dimensão
-- reset total de estado
-- cenários de erro por operação
-- introspecção de chamadas
-- `consume` idempotente
-- `restore` idempotente
+- balance seed per dimension
+- full state reset
+- error scenarios per operation
+- call introspection
+- idempotent `consume`
+- idempotent `restore`
 
-### Endpoints do mock
+### Mock Endpoints
 
-| Método | Path                                           | Uso                        |
+| Method | Path                                           | Usage                      |
 | ------ | ---------------------------------------------- | -------------------------- |
 | `GET`  | `/mock/health`                                 | health check               |
-| `POST` | `/mock/seed-balance`                           | seed de saldo              |
-| `POST` | `/mock/set-scenario`                           | simula erro/inconsistência |
-| `POST` | `/mock/reset`                                  | limpa estado               |
-| `GET`  | `/mock/calls`                                  | mostra chamadas recebidas  |
-| `GET`  | `/mock/state`                                  | mostra snapshot do estado  |
-| `GET`  | `/balances/:employeeId/:locationId/:leaveType` | consulta saldo             |
-| `POST` | `/balances/consume`                            | consome saldo              |
-| `POST` | `/balances/restore`                            | restaura saldo             |
+| `POST` | `/mock/seed-balance`                           | balance seed               |
+| `POST` | `/mock/set-scenario`                           | simulates error/inconsistency|
+| `POST` | `/mock/reset`                                  | clears state               |
+| `GET`  | `/mock/calls`                                  | shows received calls       |
+| `GET`  | `/mock/state`                                  | shows state snapshot       |
+| `GET`  | `/balances/:employeeId/:locationId/:leaveType` | queries balance            |
+| `POST` | `/balances/consume`                            | consumes balance           |
+| `POST` | `/balances/restore`                            | restores balance           |
 
-### Exemplo de cenário de erro
+### Error Scenario Example
 
 ```bash
 curl -s -X POST http://127.0.0.1:4010/mock/set-scenario \
@@ -967,46 +1060,46 @@ curl -s -X POST http://127.0.0.1:4010/mock/set-scenario \
   }'
 ```
 
-## Cenários críticos cobertos
+## Covered Critical Scenarios
 
-| Cenário                                       | Comportamento esperado                                         | Evidência             |
+| Scenario                                      | Expected Behavior                                              | Evidence              |
 | --------------------------------------------- | -------------------------------------------------------------- | --------------------- |
-| saldo stale na criação                        | refresh no HCM antes de decidir                                | tests unitários + e2e |
-| overlap de datas                              | rejeição local imediata                                        | unit                  |
-| aprovação com saldo insuficiente              | rejeição sem transição local                                   | unit + integration    |
-| timeout/erro do HCM na aprovação              | request permanece conservador                                  | unit                  |
-| resultado HCM ambíguo na aprovação            | request move para `APPROVAL_UNKNOWN` e operação fica `UNKNOWN` | integration           |
-| replay de operação HCM já bem-sucedida        | finalização local sem nova chamada ao HCM                      | integration           |
-| create retry com `Idempotency-Key`            | mesma resposta e uma única row                                 | e2e                   |
-| realtime stale                                | payload ignorado e projeção preservada                         | sync tests + e2e      |
-| payload HCM inválido                          | rejeição `INVALID_HCM_PAYLOAD` sem upsert                      | unit                  |
-| lease de dimensão ocupado                     | operação rejeitada com `BALANCE_DIMENSION_LOCKED`              | integration           |
-| cancelamento de request aprovado              | restore no HCM antes de `CANCELLED`                            | unit + e2e            |
-| update externo de saldo via sync              | projeção local atualizada                                      | sync tests            |
-| pending request impactado por novo saldo      | marcação `atRisk`                                              | sync tests + e2e      |
-| mock HCM com mudança externa, erro e inspeção | ambiente de prova reproduzível                                 | mock HCM              |
+| stale balance on creation                     | refresh in HCM before deciding                                 | unit + e2e tests      |
+| date overlap                                  | immediate local rejection                                      | unit                  |
+| approval with insufficient balance            | rejection without local transition                             | unit + integration    |
+| HCM timeout/error on approval                 | request remains conservative                                   | unit                  |
+| ambiguous HCM result on approval              | request moves to `APPROVAL_UNKNOWN`, operation becomes `UNKNOWN`| integration           |
+| replay of already successful HCM operation    | local finalization without new HCM call                        | integration           |
+| create retry with `Idempotency-Key`           | same response and a single row                                 | e2e                   |
+| stale realtime event                          | payload ignored and projection preserved                       | sync tests + e2e      |
+| invalid HCM payload                           | `INVALID_HCM_PAYLOAD` rejection without upsert                 | unit                  |
+| busy dimension lease                          | operation rejected with `BALANCE_DIMENSION_LOCKED`             | integration           |
+| cancellation of approved request              | restore in HCM before `CANCELLED`                              | unit + e2e            |
+| external balance update via sync              | local projection updated                                       | sync tests            |
+| pending request impacted by new balance       | `atRisk` marking                                               | sync tests + e2e      |
+| mock HCM with external change, error, and inspection | reproducible proof environment                          | mock HCM              |
 
-## Limitações conhecidas
+## Known Limitations
 
-- SQLite atende ao take-home, mas não é o destino ideal para concorrência pesada em produção.
-- A topologia real da entrega é local/single-node; o diagrama com múltiplas instâncias representa a arquitetura lógica, não o deployment atual.
-- Não há autenticação real; a identidade é mockada via headers por decisão de escopo.
-- Não há calendário de feriados, regras de business days ou meio período.
-- Estados `APPROVAL_UNKNOWN` e `CANCELLATION_UNKNOWN` exigem reconciliação operacional futura; esta entrega persiste e bloqueia replay automático, mas não implementa worker reconciliador.
-- Não existe painel operacional para consulta de auditoria; os logs estão persistidos, mas não expostos em API própria.
+- SQLite meets the take-home requirements, but is not the ideal destination for heavy concurrency in production.
+- The actual topology of the delivery is local/single-node; the diagram with multiple instances represents the logical architecture, not the current deployment.
+- There is no real authentication; identity is mocked via headers by scope decision.
+- There is no holiday calendar, business days rules, or half-days.
+- `APPROVAL_UNKNOWN` and `CANCELLATION_UNKNOWN` states require future operational reconciliation; this delivery persists and blocks automatic replay, but does not implement a reconciler worker.
+- There is no operational dashboard for auditing queries; logs are persisted but not exposed in their own API.
 
-## Próximos passos
+## Next Steps
 
-- migrar SQLite para PostgreSQL
-- endurecer política de concorrência com locking mais forte no armazenamento principal
-- adicionar circuit breaker e retry policy mais explícitos no cliente HCM
-- implementar reconciliador para operações HCM em estado `UNKNOWN`
-- expor auditoria operacional para sync e operações HCM
-- adicionar documentação OpenAPI/Swagger
-- ampliar cobertura dos caminhos de erro do `HcmClientService`
+- migrate SQLite to PostgreSQL
+- harden concurrency policy with stronger locking in the main storage
+- add circuit breaker and more explicit retry policy in the HCM client
+- implement a reconciler for HCM operations in `UNKNOWN` state
+- expose operational auditing for sync and HCM operations
+- add OpenAPI/Swagger documentation
+- expand coverage of `HcmClientService` error paths
 
-## Autor
+## Author
 
 **daviixs**  
 Backend take-home submission  
-Contato: `xaviersilvadavi@gmail.com`
+Contact: `xaviersilvadavi@gmail.com`
